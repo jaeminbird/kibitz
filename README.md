@@ -7,7 +7,7 @@
 Meta glasses watch the board. Stockfish thinks. The move is spoken in your ear.<br>
 **~8 ms** from the board going still to the move being spoken.
 
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-windows%20%7C%20macos%20%7C%20linux-lightgrey)
 ![Engine](https://img.shields.io/badge/engine-Stockfish%2019-success)
