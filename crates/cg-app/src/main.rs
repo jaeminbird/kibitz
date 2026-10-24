@@ -1,4 +1,4 @@
-//! `chessglass`: reads an over-the-board chess game from a video call,
+//! `kibitz`: reads an over-the-board chess game from a video call,
 //! picks the best move with Stockfish, and speaks it into the call.
 //! For friendly games where everyone at the board knows; not for rated play.
 
@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Parser)]
-#[command(name = "chessglass", version, about = "Low-latency chess move reader and adviser")]
+#[command(name = "kibitz", version, about = "Low-latency chess move reader and adviser")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -85,7 +85,7 @@ struct RunArgs {
     #[arg(long)]
     no_ponder: bool,
     /// Vision LLM used only to find the board / break ties.
-    #[arg(long, env = "CHESSGLASS_MODEL", default_value = cg_llm::DEFAULT_MODEL)]
+    #[arg(long, env = "KIBITZ_MODEL", default_value = cg_llm::DEFAULT_MODEL)]
     model: String,
     /// Never call a paid vision service (calibrate the board by clicking its corners).
     #[arg(long)]
@@ -142,7 +142,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let bus = cg_core::Bus::new(args.log.as_deref()).context("opening event log")?;
 
     // Engine first: it is the one hard dependency.
-    let sf = cg_engine::locate().context("Stockfish not found; run `chessglass setup`")?;
+    let sf = cg_engine::locate().context("Stockfish not found; run `kibitz setup`")?;
     let mut ecfg = cg_engine::EngineConfig::new(sf);
     ecfg.movetime = Duration::from_millis(args.movetime_ms);
     let engine = cg_engine::Engine::start(ecfg).await.context("starting Stockfish")?;

@@ -1,4 +1,4 @@
-//! `chessglass doctor`: check every dependency and print the fix for anything missing.
+//! `kibitz doctor`: check every dependency and print the fix for anything missing.
 
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ impl Report {
 }
 
 pub async fn run(source: &str) -> anyhow::Result<()> {
-    println!("chessglass doctor\n");
+    println!("kibitz doctor\n");
     let mut r = Report { failures: 0 };
 
     // Stockfish: found, starts, answers.
@@ -33,14 +33,14 @@ pub async fn run(source: &str) -> anyhow::Result<()> {
                     let pos = cg_engine::Position { start_fen: None, moves: vec![] };
                     match e.best_move(pos).await {
                         Ok(m) => r.ok("stockfish", &format!("{} at {} (startpos → {})", e.name(), path.display(), m.bestmove)),
-                        Err(err) => r.fail("stockfish", &err.to_string(), "reinstall with `chessglass setup`"),
+                        Err(err) => r.fail("stockfish", &err.to_string(), "reinstall with `kibitz setup`"),
                     }
                     e.shutdown().await;
                 }
-                Err(err) => r.fail("stockfish", &format!("{} won't start: {err}", path.display()), "run `chessglass setup`, or unset CHESSGLASS_STOCKFISH"),
+                Err(err) => r.fail("stockfish", &format!("{} won't start: {err}", path.display()), "run `kibitz setup`, or unset KIBITZ_STOCKFISH"),
             }
         }
-        Err(_) => r.fail("stockfish", "not found", "run `chessglass setup` (or install it and put it on PATH)"),
+        Err(_) => r.fail("stockfish", "not found", "run `kibitz setup` (or install it and put it on PATH)"),
     }
 
     // Capture source: can we grab one frame?
@@ -94,7 +94,7 @@ pub async fn run(source: &str) -> anyhow::Result<()> {
     for (p, var) in [(cg_llm::Provider::Anthropic, "ANTHROPIC_API_KEY"), (cg_llm::Provider::OpenAI, "OPENAI_API_KEY")] {
         match cg_llm::resolve_key(p) {
             Some(_) => r.ok("api key", &format!("{p:?} key found")),
-            None => r.warn("api key", &format!("no {p:?} key (optional)"), &format!("set {var} or `chessglass setup --key-…`; without one, calibrate by clicking the board corners")),
+            None => r.warn("api key", &format!("no {p:?} key (optional)"), &format!("set {var} or `kibitz setup --key-…`; without one, calibrate by clicking the board corners")),
         }
     }
 

@@ -29,7 +29,7 @@ pub struct EngineReply {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("stockfish is not installed; run `chessglass setup`")] NotInstalled,
+    #[error("stockfish is not installed; run `kibitz setup`")] NotInstalled,
     #[error("the game is over")] GameOver,
     #[error("engine timed out")] Timeout,
     #[error("engine crashed: {0}")] Crashed(String),
@@ -59,8 +59,8 @@ impl Engine {
     pub async fn shutdown(self);
 }
 
-pub fn data_dir() -> PathBuf;                    // dirs::data_dir()/chessglass
-/// Override env CHESSGLASS_STOCKFISH (used as-is) → `stockfish` on PATH (stockfish.exe on Windows)
+pub fn data_dir() -> PathBuf;                    // dirs::data_dir()/kibitz
+/// Override env KIBITZ_STOCKFISH (used as-is) → `stockfish` on PATH (stockfish.exe on Windows)
 /// → data_dir()/bin/stockfish[.exe]. Return NotInstalled if none exists.
 pub fn locate() -> Result<PathBuf, EngineError>;
 /// Download a pinned official build for this OS/arch, verify SHA-256, unpack the binary to

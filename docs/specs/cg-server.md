@@ -20,7 +20,7 @@ pub async fn serve(
 ## Routes
 | Route | Behaviour |
 |---|---|
-| `GET /` | `include_str!("../static/index.html")`, `text/html; charset=utf-8`. Title "chessglass". |
+| `GET /` | `include_str!("../static/index.html")`, `text/html; charset=utf-8`. Title "kibitz". |
 | `GET /overlay` | `include_str!("../static/overlay.html")`: an OBS-friendly page. |
 | `GET /events` | SSE. Use `bus.subscribe()`: first `event: snapshot` with the subscription snapshot, then one `event: game` per recent event (oldest first), then live messages (`BusMsg::Snapshot` → `snapshot`, `BusMsg::Event` → `game`). Data = JSON. Keep-alive comment every **15 s** (`Sse::keep_alive`). On broadcast `Lagged`, send a fresh `snapshot` and continue. |
 | `GET /frame.jpg` | 404 with body `no frame yet` until a frame exists. Otherwise JPEG (quality 75) of the latest frame, `cache-control: no-store`. **Encode at most once per frame seq**: keep a `Mutex<Option<(u64, Bytes)>>` cache shared by all requests. Do the encoding in `spawn_blocking`. |
@@ -50,7 +50,7 @@ Dark, compact, readable at a glance. Sections:
 Full-viewport `/frame.mjpg` plus the same canvas drawing (grid, suggestion arrow, status text in a corner). Transparent body background. No controls.
 
 ## Tests (`tests/web.rs`, real server on an ephemeral port range, e.g. 18000..=18050)
-- `/` serves HTML containing "chessglass".
+- `/` serves HTML containing "kibitz".
 - `/frame.jpg` is 404 before a frame. After sending `Frame::from_gray(1, 64, 48, …)` into the watch, it is 200 with JPEG magic bytes `FF D8`.
 - `/control`: wrong content type → 403; a foreign Origin → 403; same-origin JSON pause → 202 and the control arrives on the mpsc; illegal move → 400; unknown action → 400.
 - `/events`: the first event is `snapshot`, then recent events in order, then a newly emitted event arrives.

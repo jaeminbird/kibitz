@@ -45,7 +45,7 @@ fn main() -> io::Result<()> {
         match tokens.next() {
             Some("uci") => {
                 writeln!(out, "id name Fake UCI 1.0")?;
-                writeln!(out, "id author chessglass tests")?;
+                writeln!(out, "id author kibitz tests")?;
                 writeln!(out, "uciok")?;
             }
             Some("isready") => writeln!(out, "readyok")?,

@@ -64,7 +64,7 @@ async fn index_serves_html() {
     assert_eq!(resp.status(), 200);
     let ct = resp.headers()[CONTENT_TYPE].to_str().unwrap().to_string();
     assert!(ct.starts_with("text/html"), "content-type was {ct}");
-    assert!(resp.text().await.unwrap().contains("chessglass"));
+    assert!(resp.text().await.unwrap().contains("kibitz"));
 }
 
 #[tokio::test]

@@ -139,7 +139,7 @@ impl GameState {
             Color::Black => ("Opponent", "You"),
         };
         let result = self.outcome().map(|o| o.result).unwrap_or_else(|| "*".into());
-        let mut out = format!("[Event \"chessglass\"]\n[White \"{white}\"]\n[Black \"{black}\"]\n[Result \"{result}\"]\n");
+        let mut out = format!("[Event \"kibitz\"]\n[White \"{white}\"]\n[Black \"{black}\"]\n[Result \"{result}\"]\n");
         if let Some(fen) = &self.start_fen {
             out.push_str(&format!("[SetUp \"1\"]\n[FEN \"{fen}\"]\n"));
         }

@@ -83,7 +83,7 @@ pub struct EngineReply {
 /// Errors from the engine and its setup.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("stockfish is not installed; run `chessglass setup`")]
+    #[error("stockfish is not installed; run `kibitz setup`")]
     NotInstalled,
     #[error("the game is over")]
     GameOver,

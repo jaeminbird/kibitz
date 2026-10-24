@@ -1,4 +1,4 @@
-//! `chessglass bench`: replay a synthetic game through the real vision
+//! `kibitz bench`: replay a synthetic game through the real vision
 //! pipeline (with simulated camera drift and sensor noise) and time Stockfish
 //! cold vs. ponder-hit. Prints a latency report.
 
@@ -16,7 +16,7 @@ const H: u32 = 720;
 const FRAME_DT: Duration = Duration::from_millis(66);
 
 pub async fn run(frames_budget: u32) -> anyhow::Result<()> {
-    println!("chessglass bench — synthetic {W}x{H} frames at 15 fps\n");
+    println!("kibitz bench — synthetic {W}x{H} frames at 15 fps\n");
     vision_bench(frames_budget);
     engine_bench().await;
     Ok(())
@@ -183,7 +183,7 @@ fn vision_bench(frames_budget: u32) {
 
 async fn engine_bench() {
     let Ok(path) = cg_engine::locate() else {
-        println!("engine: Stockfish not installed, skipped (run `chessglass setup`)");
+        println!("engine: Stockfish not installed, skipped (run `kibitz setup`)");
         return;
     };
     let mut cfg = cg_engine::EngineConfig::new(path);

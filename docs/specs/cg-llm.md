@@ -51,7 +51,7 @@ impl VisionLlm {
 /// claude-haiku-5-5 → (0.10, 0.50), claude-fable-5-1 → (10.0, 50.0). Unknown models → (5.0, 25.0) (conservative).
 pub fn price_for(model: &str) -> (f64, f64);
 
-/// Env var (ANTHROPIC_API_KEY / OPENAI_API_KEY) wins; else keyring service "chessglass", user "anthropic"/"openai".
+/// Env var (ANTHROPIC_API_KEY / OPENAI_API_KEY) wins; else keyring service "kibitz", user "anthropic"/"openai".
 pub fn resolve_key(p: Provider) -> Option<String>;
 pub fn store_key(p: Provider, key: &str) -> anyhow::Result<()>;
 ```

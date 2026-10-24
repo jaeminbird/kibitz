@@ -72,16 +72,16 @@ fn exe_name() -> &'static str {
 pub fn data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("chessglass")
+        .join("kibitz")
 }
 
-/// Find a Stockfish binary: `CHESSGLASS_STOCKFISH`, then `PATH`, then the data dir.
+/// Find a Stockfish binary: `KIBITZ_STOCKFISH`, then `PATH`, then the data dir.
 pub fn locate() -> Result<PathBuf, EngineError> {
-    if let Some(p) = std::env::var_os("CHESSGLASS_STOCKFISH").map(PathBuf::from) {
+    if let Some(p) = std::env::var_os("KIBITZ_STOCKFISH").map(PathBuf::from) {
         if p.is_file() {
             return Ok(p);
         }
-        tracing::warn!(path = %p.display(), "CHESSGLASS_STOCKFISH does not point to a file");
+        tracing::warn!(path = %p.display(), "KIBITZ_STOCKFISH does not point to a file");
     }
     if let Some(p) = find_on_path(exe_name()) {
         return Ok(p);

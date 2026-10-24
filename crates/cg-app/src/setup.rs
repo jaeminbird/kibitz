@@ -1,4 +1,4 @@
-//! `chessglass setup`: install Stockfish, pre-render the voice vocabulary, store keys.
+//! `kibitz setup`: install Stockfish, pre-render the voice vocabulary, store keys.
 
 use std::io::Write;
 
@@ -41,6 +41,6 @@ pub async fn run(
     let speaker = cg_voice::ClipSpeaker::new(cfg)?;
     speaker.warm(&cg_core::speech::vocabulary())?;
     println!("voice: ready in {:.1}s", t.elapsed().as_secs_f32());
-    println!("\nnext: `chessglass doctor`, then `chessglass run --color white`");
+    println!("\nnext: `kibitz doctor`, then `kibitz run --color white`");
     Ok(())
 }

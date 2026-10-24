@@ -1,4 +1,4 @@
-# chessglass — architecture
+# kibitz — architecture
 
 A Rust rewrite of *chesshacker*. It does the same job: someone wearing Meta glasses video-calls a computer, and the computer reads the over-the-board game, asks Stockfish for a move, and speaks it into the call. Like the original, it is meant for friendly games where everyone at the board knows about it, not for rated or tournament play.
 
@@ -6,7 +6,7 @@ The goal of the rewrite is the time from **opponent's hand leaves the board → 
 
 ## Latency budget
 
-| Stage | Original (TS) | chessglass | How |
+| Stage | Original (TS) | kibitz | How |
 |---|---|---|---|
 | Notice a frame worth reading | poll 1s (opp) / 3s (you) | ≤ 1 frame (66 ms @ 15 fps) | Continuous capture thread + `watch` channel (latest-frame-wins, never queued) |
 | "Is the board readable / hand gone?" | Jev cloud pre-check, 5 s timeout | ~0.1 ms local | Motion-energy stability gate on a 64×36 thumbnail |
@@ -41,9 +41,9 @@ The remaining fixed cost is the stability window: you can't read a move while a 
 
 | What | Result | Source |
 |---|---|---|
-| Vision per frame (track + warp + gate + stats), 1280×720 | p50 3.3 ms, p95 3.4 ms | `chessglass bench` |
-| Move reading, 40-ply synthetic game with head drift + noise | 39 correct, 0 wrong, 1 deferred (an under-promotion, by design) | `chessglass bench` |
-| Stockfish 19, normal search / ponder hit | 300 ms / **0.9 ms** (10 of 10 hits) | `chessglass bench` |
+| Vision per frame (track + warp + gate + stats), 1280×720 | p50 3.3 ms, p95 3.4 ms | `kibitz bench` |
+| Move reading, 40-ply synthetic game with head drift + noise | 39 correct, 0 wrong, 1 deferred (an under-promotion, by design) | `kibitz bench` |
+| Stockfish 19, normal search / ponder hit | 300 ms / **0.9 ms** (10 of 10 hits) | `kibitz bench` |
 | End to end through `run` (capture → loop → engine → speech), self-play game | **8.2 ms** from settled board to speech on a ponder hit | `bench --dump --selfplay` + `run --source dir:` |
 | Speech: `say()` → audio queued | ~0.12 ms (78-word vocabulary pre-rendered in 0.7 s) | cg-voice example |
 | Window capture (WGC) | ~13 ms/frame steady state | cg-capture `grab` example |
@@ -84,7 +84,7 @@ There is one owner of game state, so the hot path takes no locks. All heavy per-
 | `cg-voice` | `Speaker` impls: clip cache, command fallback, null | `docs/specs/cg-voice.md` |
 | `cg-llm` | optional vision LLM (Anthropic / OpenAI): locate board, pick move among legal moves; cost tally | `docs/specs/cg-llm.md` |
 | `cg-server` | axum command center, SSE, frame JPEG, overlay page, controls | `docs/specs/cg-server.md` |
-| `cg-app` | `chessglass` binary: CLI, orchestrator/game actor, doctor, setup, bench | `docs/specs/cg-app.md` |
+| `cg-app` | `kibitz` binary: CLI, orchestrator/game actor, doctor, setup, bench | `docs/specs/cg-app.md` |
 
 ## Deferred / dropped
 

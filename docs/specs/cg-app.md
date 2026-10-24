@@ -1,16 +1,16 @@
-# cg-app spec (`chessglass` binary)
+# cg-app spec (`kibitz` binary)
 
 ## CLI (clap derive)
 ```
-chessglass run     [--color white|black] [--fen FEN] [--source window:WhatsApp|file:PATH|dir:PATH]
+kibitz run     [--color white|black] [--fen FEN] [--source window:WhatsApp|file:PATH|dir:PATH]
                    [--fps 15] [--movetime-ms 300] [--settle-ms 300] [--no-ponder]
                    [--model claude-opus-5-5] [--no-llm] [--max-cost 10]
                    [--voice-device BlackHole] [--no-voice] [--run-dir DIR] [--log FILE] [--no-open]
-chessglass setup   [--key-anthropic K] [--key-openai K]   # download Stockfish, warm voice clips, store keys
-chessglass doctor                                          # check every dependency, print fixes
-chessglass bench   [--frames 300]                          # synthetic end-to-end latency benchmark
+kibitz setup   [--key-anthropic K] [--key-openai K]   # download Stockfish, warm voice clips, store keys
+kibitz doctor                                          # check every dependency, print fixes
+kibitz bench   [--frames 300]                          # synthetic end-to-end latency benchmark
 ```
-Env overrides: `CHESSGLASS_STOCKFISH`, `CHESSGLASS_MODEL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+Env overrides: `KIBITZ_STOCKFISH`, `KIBITZ_MODEL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
 
 ## Modules
 - `game.rs`: `GameState`, a pure wrapper over shakmaty: start position, move list (SAN + UCI + side), play/undo, outcome, PGN text, engine `Position`. Unit-tested.

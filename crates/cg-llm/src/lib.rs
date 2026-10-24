@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 /// Default model for [`LlmConfig::new`] callers that have no preference.
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 
-const KEYRING_SERVICE: &str = "chessglass";
+const KEYRING_SERVICE: &str = "kibitz";
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const LOCATE_PROMPT: &str = "This is a photo from glasses worn by a chess player looking at a physical chessboard. Return the pixel positions of the four outer corners of the 8×8 playing area (exclude any border/frame with coordinates), as fractions of image width and height, ordered top-left, top-right, bottom-right, bottom-left as they appear in the image. If no chessboard is visible set found=false.";

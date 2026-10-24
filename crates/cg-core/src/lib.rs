@@ -1,4 +1,4 @@
-//! Shared contract for every chessglass crate: frames, events, snapshot,
+//! Shared contract for every kibitz crate: frames, events, snapshot,
 //! controls, and the event bus. Keep this crate dependency-light; everything
 //! else builds on it.
 
