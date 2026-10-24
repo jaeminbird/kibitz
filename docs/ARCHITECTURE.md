@@ -37,6 +37,25 @@ The remaining fixed cost is the stability window: you can't read a move while a 
 | 13 | `chess.js` | — | `shakmaty` (fast legal movegen, SAN, FEN) |
 | 14 | Server on 127.0.0.1:8000–8010, JSON + same-origin controls, 15 s keepalive | Fine | Kept as is (axum) |
 
+## Measured (Windows 11, release build)
+
+| What | Result | Source |
+|---|---|---|
+| Vision per frame (track + warp + gate + stats), 1280×720 | p50 3.3 ms, p95 3.4 ms | `chessglass bench` |
+| Move reading, 40-ply synthetic game with head drift + noise | 39 correct, 0 wrong, 1 deferred (an under-promotion, by design) | `chessglass bench` |
+| Stockfish 19, normal search / ponder hit | 300 ms / **0.9 ms** (10 of 10 hits) | `chessglass bench` |
+| End to end through `run` (capture → loop → engine → speech), self-play game | **8.2 ms** from settled board to speech on a ponder hit | `bench --dump --selfplay` + `run --source dir:` |
+| Speech: `say()` → audio queued | ~0.12 ms (78-word vocabulary pre-rendered in 0.7 s) | cg-voice example |
+| Window capture (WGC) | ~13 ms/frame steady state | cg-capture `grab` example |
+
+## Changes made during the build
+
+- **Promotions.** A board photo shows that a pawn promoted but not which piece it became. Vision reports this as "ambiguous". The game loop then asks the LLM, which picks among the four pieces if one is configured. Without an LLM it assumes a queen and logs an "undo if it was another piece" note.
+- **Gate: local-change criterion.** A piece appearing between two frames barely moves the *mean* motion. The gate now also treats any single thumbnail cell changing by more than 20 gray levels as motion. This took the bench from 24 to 39 of 40 moves read.
+- **Tracker.** Each corner is predicted from its own recent motion, and the templates are sampled rotated by the board's roll since calibration. Templates are still never re-cut, so there is no drift. Error stays at or below 1.7 px through a 10° roll.
+- **Capture on Windows** uses Windows Graphics Capture (xcap `wgc`). It is about 3× faster than GDI and captures GPU-composited call video, which GDI often returns black for.
+- **Stockfish 19** has no `Ponder` UCI option. `go ponder` and `ponderhit` work without it.
+
 ## Process layout
 
 ```
@@ -68,6 +87,8 @@ There is one owner of game state, so the hot path takes no locks. All heavy per-
 | `cg-app` | `chessglass` binary: CLI, orchestrator/game actor, doctor, setup, bench | `docs/specs/cg-app.md` |
 
 ## Deferred / dropped
+
+- **Persistent WGC session** (frame-arrived callbacks, ~1 ms/frame instead of a capture session per frame) and a macOS ScreenCaptureKit stream. These belong behind the existing `FrameSource` trait.
 
 - **Overlay recording/streaming to file** (`--overlay-out`): dropped from v1. The overlay is an HTML page, so OBS Browser Source still works and covers streaming. It can come back later as an ffmpeg pipe fed the raw frames.
 - **Jev / TypeSafe**: dropped (replaced by the local gate).
