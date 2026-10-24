@@ -28,7 +28,7 @@ impl Frame {
         assert!(rgba.len() >= n * 4, "rgba buffer too small");
         let mut rgb = Vec::with_capacity(n * 3);
         let mut gray = Vec::with_capacity(n);
-        for px in rgba[..n * 4].chunks_exact(4) {
+        for px in rgba[..n * 4].as_chunks::<4>().0 {
             rgb.extend_from_slice(&px[..3]);
             gray.push(luma(px[0], px[1], px[2]));
         }
@@ -39,7 +39,7 @@ impl Frame {
     pub fn from_rgb(seq: u64, width: u32, height: u32, rgb: Vec<u8>) -> Frame {
         let n = (width * height) as usize;
         assert!(rgb.len() >= n * 3, "rgb buffer too small");
-        let gray = rgb[..n * 3].chunks_exact(3).map(|p| luma(p[0], p[1], p[2])).collect();
+        let gray = rgb[..n * 3].as_chunks::<3>().0.iter().map(|p| luma(p[0], p[1], p[2])).collect();
         Frame::new(seq, width, height, rgb, gray)
     }
 

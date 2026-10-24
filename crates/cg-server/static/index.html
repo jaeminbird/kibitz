@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chessglass</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0f13;
+    --panel: #161a22;
+    --panel-2: #1d222d;
+    --line: #2a3040;
+    --text: #e8eaf0;
+    --muted: #8b93a7;
+    --accent: #7fd1ff;
+    --arrow: #ffc94d;
+    --good: #34c17b;
+    --warn: #f0b43c;
+    --bad: #ff5d5d;
+    --mono: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+  }
+  header.top {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+    margin-bottom: 14px;
+  }
+  .brand { font-weight: 700; letter-spacing: .02em; font-size: 17px; }
+  .spacer { flex: 1; }
+  .muted { color: var(--muted); }
+  .mono { font-family: var(--mono); }
+  .pill {
+    --c: #7a8296;
+    background: var(--c); color: #0b0d10;
+    padding: 6px 14px; border-radius: 999px;
+    font-weight: 700; font-size: 16px; white-space: nowrap;
+  }
+  .conn {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .conn.live { color: var(--good); border-color: var(--good); }
+  .conn.down { color: var(--bad); border-color: var(--bad); }
+  main {
+    display: grid; gap: 14px;
+    grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
+    align-items: start;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .col { display: grid; gap: 14px; min-width: 0; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 14px; min-width: 0;
+  }
+  .label {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin-bottom: 8px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  button, select, input {
+    font: inherit; color: var(--text);
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 12px; min-height: 40px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.primary { background: var(--accent); color: #0b0d10; border-color: var(--accent); font-weight: 600; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .row input { flex: 1 1 180px; min-width: 0; }
+  .msg { min-height: 1.4em; margin-top: 10px; color: var(--bad); font-size: 14px; }
+
+  /* Live view */
+  .view {
+    position: relative; width: 100%;
+    aspect-ratio: 4 / 3; background: #000; border-radius: 8px; overflow: hidden;
+  }
+  .view img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .view canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .view.calibrating canvas { pointer-events: auto; cursor: crosshair; }
+  .noframe {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: var(--muted); font-size: 14px;
+  }
+  .view-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+  .hint { flex: 1; color: var(--warn); font-weight: 600; min-width: 0; }
+
+  /* Suggestion */
+  .sugg-san { font-family: var(--mono); font-size: 56px; font-weight: 700; line-height: 1; color: var(--accent); }
+  .spoken { font-size: 18px; margin-top: 8px; }
+  .sugg-meta { display: flex; gap: 12px; margin-top: 6px; font-size: 14px; flex-wrap: wrap; }
+  .conf { height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden; margin-top: 12px; }
+  .conf > div { height: 100%; width: 0; background: var(--arrow); border-radius: 999px; transition: width .3s; }
+
+  /* Latency */
+  .lat { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .lat div { background: var(--panel-2); border-radius: 8px; padding: 8px; }
+  .lat span { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .lat b { font-family: var(--mono); font-size: 18px; font-weight: 600; }
+  .badge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; margin-top: 8px; }
+  @media (max-width: 420px) { .lat { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+  /* Moves */
+  .moves-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; font-family: var(--mono); }
+  .moves-list li { display: grid; grid-template-columns: 44px 1fr 1fr; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+  .moves-list .n { color: var(--muted); }
+  .moves-list .w, .moves-list .b { font-weight: 600; }
+
+  /* Log */
+  .tabs { display: flex; gap: 4px; text-transform: none; letter-spacing: 0; }
+  .tabs button { min-height: 30px; padding: 4px 10px; font-size: 13px; }
+  .tabs button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .log { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; font-size: 13px; }
+  .log li { padding: 5px 2px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; }
+  .log time { font-family: var(--mono); color: var(--muted); flex: none; }
+  .log .move { color: var(--text); font-weight: 600; }
+  .log .bad { color: var(--bad); }
+  .log .dim { color: var(--muted); }
+  .empty { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <span class="brand">chessglass</span>
+  <span id="pill" class="pill">Connecting</span>
+  <span id="conn" class="conn">connecting</span>
+  <span class="spacer"></span>
+  <span id="model" class="mono muted" hidden></span>
+  <span id="spend" class="mono muted"></span>
+</header>
+
+<main>
+  <div class="col">
+    <section class="card">
+      <div id="view" class="view">
+        <img id="cam" src="/frame.mjpg" alt="Live camera view">
+        <canvas id="ov"></canvas>
+        <div id="noframe" class="noframe">Waiting for the first frame</div>
+      </div>
+      <div class="view-bar">
+        <span id="hint" class="hint" aria-live="polite"></span>
+        <button id="calBtn" type="button">Set corners</button>
+        <button id="calCancel" type="button" hidden>Cancel</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="label">Controls</div>
+      <div class="btns">
+        <button id="pauseBtn" type="button">Pause</button>
+        <button id="undoBtn" type="button">Undo</button>
+        <button id="repeatBtn" type="button">Repeat</button>
+        <button id="relocBtn" type="button">Relocate board</button>
+      </div>
+      <form id="moveForm" class="row" autocomplete="off">
+        <input id="mv" type="text" placeholder="Enter a move, e.g. Nf3 or g1f3" spellcheck="false" aria-label="Move">
+        <button type="submit">Enter move</button>
+      </form>
+      <form id="newForm" class="row">
+        <select id="color" aria-label="My colour">
+          <option value="white">I play White</option>
+          <option value="black">I play Black</option>
+        </select>
+        <input id="fen" type="text" placeholder="Starting FEN (optional)" spellcheck="false" aria-label="FEN">
+        <button type="submit">New game</button>
+      </form>
+      <div id="msg" class="msg" role="alert"></div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section id="sugg" class="card" hidden>
+      <div class="label"><span>Suggested</span><span id="uci" class="mono"></span></div>
+      <div id="sanBig" class="sugg-san"></div>
+      <div id="spoken" class="spoken"></div>
+      <div class="sugg-meta"><span id="score" class="mono"></span></div>
+      <div class="conf" title="confidence"><div id="confBar"></div></div>
+    </section>
+
+    <section class="card">
+      <div class="label">Latency</div>
+      <div class="lat">
+        <div><span>Detect</span><b id="l-detect">–</b></div>
+        <div><span>Engine</span><b id="l-engine">–</b></div>
+        <div><span>Total</span><b id="l-total">–</b></div>
+        <div><span>Frame</span><b id="l-frame">–</b></div>
+      </div>
+      <span id="ponder" class="badge" hidden></span>
+    </section>
+
+    <section class="card">
+      <div class="label">Moves</div>
+      <ul id="moveList" class="moves-list"></ul>
+      <div id="noMoves" class="empty">no moves</div>
+    </section>
+
+    <section class="card">
+      <div class="label">
+        <span>Log</span>
+        <span class="tabs" role="group" aria-label="Log filter">
+          <button type="button" data-f="all" aria-pressed="true">All</button>
+          <button type="button" data-f="moves" aria-pressed="false">Moves</button>
+          <button type="button" data-f="problems" aria-pressed="false">Problems</button>
+        </span>
+      </div>
+      <ul id="log" class="log"></ul>
+    </section>
+  </div>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const MAX_LOG = 300;
+  const STATUS_COLOR = {
+    your_move: '#34c17b',
+    waiting_for_opponent: '#5b9cff',
+    paused: '#f0b43c',
+    looking_for_board: '#7a8296',
+    lost_track: '#ff5d5d',
+    cant_see_call: '#ff8a3d',
+    game_over: '#b48cff',
+    recording_finished: '#7a8296',
+  };
+  const CORNER_NAMES = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
+  const PROBLEM_KINDS = new Set(['lost_track', 'source_missing', 'error']);
+  const MOVE_KINDS = new Set(['commit', 'undo']);
+
+  const el = {
+    pill: $('pill'), conn: $('conn'), model: $('model'), spend: $('spend'),
+    view: $('view'), img: $('cam'), cv: $('ov'), noframe: $('noframe'),
+    hint: $('hint'), calBtn: $('calBtn'), calCancel: $('calCancel'),
+    pauseBtn: $('pauseBtn'), undoBtn: $('undoBtn'), repeatBtn: $('repeatBtn'), relocBtn: $('relocBtn'),
+    moveForm: $('moveForm'), mv: $('mv'), newForm: $('newForm'), color: $('color'), fen: $('fen'),
+    msg: $('msg'), sugg: $('sugg'), sanBig: $('sanBig'), spoken: $('spoken'), score: $('score'),
+    uci: $('uci'), confBar: $('confBar'), moveList: $('moveList'), noMoves: $('noMoves'),
+    log: $('log'), ponder: $('ponder'),
+  };
+  const ctx = el.cv.getContext('2d');
+
+  let snap = null;
+  let events = [];          // newest first
+  let filter = 'all';
+  let calib = null;         // on-screen clicks as frame fractions, while calibrating
+  let msgTimer = null;
+
+  // ---- helpers -------------------------------------------------------------
+
+  const node = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  const fmtMs = (v) => (v == null ? '–' : `${Math.round(v)} ms`);
+  const fmtNum = (v, d = 2) => (v == null ? '–' : v.toFixed(d));
+
+  function flash(text) {
+    el.msg.textContent = text;
+    clearTimeout(msgTimer);
+    if (text) msgTimer = setTimeout(() => { el.msg.textContent = ''; }, 6000);
+  }
+
+  async function send(body) {
+    try {
+      const r = await fetch('/control', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) { flash(''); return true; }
+      let text = await r.text();
+      try { text = JSON.parse(text).error || text; } catch (_) { /* plain text body */ }
+      flash(`${r.status}: ${text}`);
+    } catch (e) {
+      flash(`request failed: ${e.message}`);
+    }
+    return false;
+  }
+
+  // ---- board geometry ------------------------------------------------------
+  // Corners are [a8, h8, h1, a1] in frame pixels. The board is the unit square
+  // with u = file/8 (a=0) and v = (8 - rank)/8, mapped by a projective
+  // (homography) transform that sends the square's corners onto the 4 points.
+
+  function boardMap(c) {
+    const [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = c;
+    const dx1 = x1 - x2, dx2 = x3 - x2, dx3 = x0 - x1 + x2 - x3;
+    const dy1 = y1 - y2, dy2 = y3 - y2, dy3 = y0 - y1 + y2 - y3;
+    let g = 0, h = 0;
+    if (dx3 !== 0 || dy3 !== 0) {
+      const den = dx1 * dy2 - dx2 * dy1;
+      g = (dx3 * dy2 - dx2 * dy3) / den;
+      h = (dx1 * dy3 - dx3 * dy1) / den;
+    }
+    const a = x1 - x0 + g * x1, b = x3 - x0 + h * x3, cc = x0;
+    const d = y1 - y0 + g * y1, e = y3 - y0 + h * y3, f = y0;
+    return (u, v) => {
+      const w = g * u + h * v + 1;
+      return [(a * u + b * v + cc) / w, (d * u + e * v + f) / w];
+    };
+  }
+
+  // Frame size -> the area it occupies inside a W x H canvas (object-fit: contain).
+  function fitRect(W, H) {
+    const fs = snap && snap.frame_size;
+    if (!fs || !fs[0] || !fs[1]) return null;
+    const s = Math.min(W / fs[0], H / fs[1]);
+    return { fw: fs[0], fh: fs[1], s, ox: (W - fs[0] * s) / 2, oy: (H - fs[1] * s) / 2 };
+  }
+
+  function drawBoard(r, map) {
+    const P = (u, v) => { const [x, y] = map(u, v); return [r.ox + x * r.s, r.oy + y * r.s]; };
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.beginPath();
+    for (let i = 0; i <= 8; i++) {
+      const [ax, ay] = P(i / 8, 0), [bx, by] = P(i / 8, 1);
+      ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      const [cx, cy] = P(0, i / 8), [dx, dy] = P(1, i / 8);
+      ctx.moveTo(cx, cy); ctx.lineTo(dx, dy);
+    }
+    ctx.stroke();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(127,209,255,0.8)';
+    ctx.beginPath();
+    [[0, 0], [1, 0], [1, 1], [0, 1]].forEach(([u, v], i) => {
+      const [x, y] = P(u, v);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+    return P;
+  }
+
+  function drawArrow(P, uci) {
+    if (!uci || uci.length < 4) return;
+    const centre = (sq) => {
+      const file = sq.charCodeAt(0) - 97;
+      const row = 8 - Number(sq[1]);           // 0 = rank 8 (top)
+      return P((file + 0.5) / 8, (row + 0.5) / 8);
+    };
+    const [x1, y1] = centre(uci.slice(0, 2));
+    const [x2, y2] = centre(uci.slice(2, 4));
+    const ang = Math.atan2(y2 - y1, x2 - x1);
+    const head = 18;
+    ctx.strokeStyle = 'rgba(255,201,77,0.95)';
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = 7;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2 - Math.cos(ang) * head * 0.8, y2 - Math.sin(ang) * head * 0.8);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - head * Math.cos(ang - 0.45), y2 - head * Math.sin(ang - 0.45));
+    ctx.lineTo(x2 - head * Math.cos(ang + 0.45), y2 - head * Math.sin(ang + 0.45));
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawClicks(r) {
+    if (!calib) return;
+    const pts = calib.map(([fx, fy]) => [r.ox + fx * r.fw * r.s, r.oy + fy * r.fh * r.s]);
+    ctx.strokeStyle = 'rgba(255,201,77,0.9)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => { if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
+    ctx.stroke();
+    pts.forEach(([x, y], i) => {
+      ctx.fillStyle = '#ffc94d';
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#0b0d10';
+      ctx.font = '600 11px system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(String(i + 1), x, y);
+    });
+  }
+
+  function draw() {
+    const W = el.cv.clientWidth, H = el.cv.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    if (el.cv.width !== Math.round(W * dpr) || el.cv.height !== Math.round(H * dpr)) {
+      el.cv.width = Math.round(W * dpr);
+      el.cv.height = Math.round(H * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const r = fitRect(W, H);
+    if (!r) return;
+    if (snap.corners) {
+      const P = drawBoard(r, boardMap(snap.corners));
+      if (snap.suggestion) drawArrow(P, snap.suggestion.uci);
+    }
+    drawClicks(r);
+  }
+
+  // ---- calibration ---------------------------------------------------------
+
+  function setCalibrating(on) {
+    if (on && !(snap && snap.frame_size)) { flash('No frame yet, nothing to calibrate on.'); return; }
+    calib = on ? [] : null;
+    el.view.classList.toggle('calibrating', on);
+    el.calBtn.hidden = on;
+    el.calCancel.hidden = !on;
+    updateHint();
+    draw();
+  }
+
+  function updateHint() {
+    el.hint.textContent = calib
+      ? `Click the board corners: ${CORNER_NAMES[calib.length]} (${calib.length + 1} of 4)`
+      : '';
+  }
+
+  el.cv.addEventListener('click', (ev) => {
+    if (!calib) return;
+    const r = fitRect(el.cv.clientWidth, el.cv.clientHeight);
+    if (!r) return;
+    const rect = el.cv.getBoundingClientRect();
+    const fx = (ev.clientX - rect.left - r.ox) / (r.fw * r.s);
+    const fy = (ev.clientY - rect.top - r.oy) / (r.fh * r.s);
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;   // outside the picture
+    calib.push([fx, fy]);
+    if (calib.length === 4) {
+      const view = calib;
+      setCalibrating(false);
+      send({ action: 'set_corners', view });
+    } else {
+      updateHint();
+      draw();
+    }
+  });
+  el.calBtn.addEventListener('click', () => setCalibrating(true));
+  el.calCancel.addEventListener('click', () => setCalibrating(false));
+
+  // ---- rendering -----------------------------------------------------------
+
+  function renderSnap() {
+    const s = snap;
+    el.pill.textContent = s.status_label;
+    el.pill.style.setProperty('--c', STATUS_COLOR[s.status] || '#7a8296');
+    el.pauseBtn.textContent = s.paused ? 'Resume' : 'Pause';
+    el.spend.textContent = `$${s.spent_usd.toFixed(2)} / $${s.max_cost_usd.toFixed(2)}`;
+    el.model.hidden = !s.llm_enabled;
+    el.model.textContent = s.llm_enabled ? (s.model || 'LLM on') : '';
+
+    const g = s.suggestion;
+    el.sugg.hidden = !g;
+    if (g) {
+      el.sanBig.textContent = g.san;
+      el.spoken.textContent = g.spoken;
+      el.score.textContent = g.score_text;
+      el.uci.textContent = g.uci;
+      el.confBar.style.width = `${Math.round(g.confidence * 100)}%`;
+    }
+
+    const L = s.latency;
+    el.noframe.hidden = !!s.frame_size;
+    if (s.frame_size) el.view.style.aspectRatio = `${s.frame_size[0]} / ${s.frame_size[1]}`;
+    document.getElementById('l-detect').textContent = fmtMs(L.detect_ms);
+    document.getElementById('l-engine').textContent = fmtMs(L.engine_ms);
+    document.getElementById('l-total').textContent = fmtMs(L.total_ms);
+    document.getElementById('l-frame').textContent = fmtMs(L.frame_ms);
+    if (L.ponder_hit == null) {
+      el.ponder.hidden = true;
+    } else {
+      el.ponder.hidden = false;
+      el.ponder.textContent = L.ponder_hit ? 'ponder hit' : 'ponder miss';
+      el.ponder.style.color = L.ponder_hit ? 'var(--good)' : 'var(--muted)';
+    }
+    renderMoves(s.moves);
+    draw();
+  }
+
+  let lastMoves = null;
+  function renderMoves(list) {
+    const key = list.join(' ');
+    if (key === lastMoves) return;
+    lastMoves = key;
+    el.moveList.replaceChildren();
+    el.noMoves.hidden = list.length > 0;
+    for (let i = 0; i < list.length; i += 2) {
+      const li = document.createElement('li');
+      li.append(node('span', 'n', `${i / 2 + 1}.`), node('span', 'w', list[i]), node('span', 'b', list[i + 1] ?? ''));
+      el.moveList.append(li);
+    }
+    el.moveList.scrollTop = el.moveList.scrollHeight;
+  }
+
+  function describe(e) {
+    switch (e.kind) {
+      case 'commit': {
+        const who = e.by === 'you' ? 'You' : 'Opponent';
+        let text = `${who} played ${e.san}`;
+        if (e.by === 'you' && e.suggested && e.suggested !== e.san) text += ` (suggested ${e.suggested})`;
+        const extra = [e.source, e.margin != null ? `margin ${fmtNum(e.margin)}` : null].filter(Boolean);
+        if (extra.length) text += ` [${extra.join(', ')}]`;
+        return { text, cls: 'move' };
+      }
+      case 'undo': return { text: `Undo ${e.san}`, cls: 'move' };
+      case 'suggest': {
+        let text = `Suggest ${e.san} (${e.spoken}), ${e.score_text}, engine ${fmtMs(e.engine_ms)}`;
+        if (e.ponder_hit) text += ', ponder hit';
+        return { text, cls: '' };
+      }
+      case 'frame': {
+        let text = `Frame ${e.seq}: ${e.changed_squares} changed, best ${e.best ?? '–'}, margin ${fmtNum(e.margin)}`;
+        if (e.skipped) text += `, skipped: ${e.skipped}`;
+        text += `, vision ${fmtMs(e.vision_ms)}`;
+        return { text, cls: 'dim' };
+      }
+      case 'board_found': return { text: `Board found (${e.source})`, cls: '' };
+      case 'lost_track': return { text: `Lost track: ${e.reason}`, cls: 'bad' };
+      case 'source_missing': return { text: `Source missing: ${e.message}`, cls: 'bad' };
+      case 'paused': return { text: `Paused: ${e.reason}`, cls: '' };
+      case 'resumed': return { text: 'Resumed', cls: '' };
+      case 'new_game': return { text: `New game, ${e.color}${e.fen ? ` (${e.fen})` : ''}`, cls: '' };
+      case 'game_over': return { text: `Game over: ${e.result} (${e.reason})`, cls: '' };
+      case 'spend': return { text: `Spend $${e.usd.toFixed(4)}, total $${e.total_usd.toFixed(2)}, ${e.purpose}`, cls: 'dim' };
+      case 'error': return { text: `Error [${e.source}]: ${e.message}`, cls: 'bad' };
+      case 'info': return { text: e.message, cls: 'dim' };
+      default: return { text: JSON.stringify(e), cls: 'dim' };
+    }
+  }
+
+  function matches(e) {
+    if (filter === 'moves') return MOVE_KINDS.has(e.kind);
+    if (filter === 'problems') return PROBLEM_KINDS.has(e.kind);
+    return true;
+  }
+
+  function logItem(e) {
+    const { text, cls } = describe(e);
+    const li = document.createElement('li');
+    const t = new Date(e.ts_ms);
+    li.append(node('time', null, t.toLocaleTimeString([], { hour12: false })), node('span', cls, text));
+    return li;
+  }
+
+  function renderLog() {
+    el.log.replaceChildren();
+    const shown = events.filter(matches);
+    if (!shown.length) el.log.append(node('li', 'empty', 'nothing yet'));
+    shown.forEach((e) => el.log.append(logItem(e)));
+  }
+
+  function addEvent(e) {
+    events.unshift(e);
+    if (events.length > MAX_LOG) events.length = MAX_LOG;
+    if (!matches(e)) return;
+    el.log.querySelector('.empty')?.remove();
+    el.log.prepend(logItem(e));
+    while (el.log.children.length > MAX_LOG) el.log.lastChild.remove();
+  }
+
+  // ---- wiring --------------------------------------------------------------
+
+  el.pauseBtn.addEventListener('click', () => send({ action: snap && snap.paused ? 'resume' : 'pause' }));
+  el.undoBtn.addEventListener('click', () => send({ action: 'undo' }));
+  el.repeatBtn.addEventListener('click', () => send({ action: 'repeat' }));
+  el.relocBtn.addEventListener('click', () => send({ action: 'relocate' }));
+
+  el.moveForm.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const mv = el.mv.value.trim();
+    if (!mv) return;
+    if (await send({ action: 'move', mv })) el.mv.value = '';
+  });
+
+  el.newForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const body = { action: 'new_game', color: el.color.value };
+    const fen = el.fen.value.trim();
+    if (fen) body.fen = fen;
+    send(body);
+  });
+
+  document.querySelector('.tabs').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-f]');
+    if (!b) return;
+    filter = b.dataset.f;
+    for (const x of document.querySelectorAll('.tabs button')) {
+      x.setAttribute('aria-pressed', String(x === b));
+    }
+    renderLog();
+  });
+
+  new ResizeObserver(() => draw()).observe(el.view);
+
+  // The MJPEG stream does not recover on its own after the server restarts.
+  el.img.addEventListener('error', () => {
+    setTimeout(() => { el.img.src = `/frame.mjpg?t=${Date.now()}`; }, 1000);
+  });
+
+  // ---- live connection -----------------------------------------------------
+
+  const es = new EventSource('/events');
+  es.addEventListener('open', () => {
+    el.conn.textContent = 'live';
+    el.conn.className = 'conn live';
+    // The server replays history on every connection, so start the log over.
+    events = [];
+    renderLog();
+    if (el.img.naturalWidth === 0) el.img.src = `/frame.mjpg?t=${Date.now()}`;
+  });
+  es.addEventListener('error', () => {
+    el.conn.textContent = 'disconnected';
+    el.conn.className = 'conn down';
+  });
+  es.addEventListener('snapshot', (e) => {
+    snap = JSON.parse(e.data);
+    renderSnap();
+  });
+  es.addEventListener('game', (e) => addEvent(JSON.parse(e.data)));
+})();
+</script>
+</body>
+</html>

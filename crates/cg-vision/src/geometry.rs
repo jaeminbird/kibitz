@@ -14,6 +14,7 @@ pub struct Homography(pub [f64; 9]);
 impl Homography {
     /// Solve for H such that `H * src[i] ~ dst[i]` for four point pairs.
     /// Returns None for degenerate input (three collinear points etc.).
+    #[allow(clippy::needless_range_loop)] // index-based elimination reads clearer
     pub fn from_points(src: [[f64; 2]; 4], dst: [[f64; 2]; 4]) -> Option<Homography> {
         // Unknowns h0..h7 (h8 = 1). Two equations per correspondence.
         let mut a = [[0f64; 9]; 8];

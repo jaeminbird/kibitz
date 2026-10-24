@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chessglass overlay</title>
+<style>
+  /* Transparent so OBS can composite it over other sources. */
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  #stage { position: fixed; inset: 0; }
+  #stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .tag {
+    position: absolute; top: 12px; font: 600 16px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #fff; background: rgba(13,15,19,0.78); padding: 8px 12px; border-radius: 8px;
+    display: flex; align-items: center; gap: 10px; white-space: nowrap;
+  }
+  .tag .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--c, #7a8296); }
+  #status { left: 12px; }
+  #best { right: 12px; font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 28px; color: #7fd1ff; }
+  #best:empty { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <img id="cam" src="/frame.mjpg" alt="">
+  <canvas id="ov"></canvas>
+  <div id="status" class="tag"><span class="dot"></span><span id="statusText"></span></div>
+  <div id="best" class="tag"></div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const STATUS_COLOR = {
+    your_move: '#34c17b',
+    waiting_for_opponent: '#5b9cff',
+    paused: '#f0b43c',
+    looking_for_board: '#7a8296',
+    lost_track: '#ff5d5d',
+    cant_see_call: '#ff8a3d',
+    game_over: '#b48cff',
+    recording_finished: '#7a8296',
+  };
+  const cv = $('ov');
+  const ctx = cv.getContext('2d');
+  const stage = $('stage');
+  const img = $('cam');
+  let snap = null;
+
+  // Corners are [a8, h8, h1, a1] in frame pixels; the board is the unit square
+  // mapped by a projective transform (see index.html for the derivation).
+  function boardMap(c) {
+    const [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = c;
+    const dx1 = x1 - x2, dx2 = x3 - x2, dx3 = x0 - x1 + x2 - x3;
+    const dy1 = y1 - y2, dy2 = y3 - y2, dy3 = y0 - y1 + y2 - y3;
+    let g = 0, h = 0;
+    if (dx3 !== 0 || dy3 !== 0) {
+      const den = dx1 * dy2 - dx2 * dy1;
+      g = (dx3 * dy2 - dx2 * dy3) / den;
+      h = (dx1 * dy3 - dx3 * dy1) / den;
+    }
+    const a = x1 - x0 + g * x1, b = x3 - x0 + h * x3, cc = x0;
+    const d = y1 - y0 + g * y1, e = y3 - y0 + h * y3, f = y0;
+    return (u, v) => {
+      const w = g * u + h * v + 1;
+      return [(a * u + b * v + cc) / w, (d * u + e * v + f) / w];
+    };
+  }
+
+  function fitRect(W, H) {
+    const fs = snap && snap.frame_size;
+    if (!fs || !fs[0] || !fs[1]) return null;
+    const s = Math.min(W / fs[0], H / fs[1]);
+    return { s, ox: (W - fs[0] * s) / 2, oy: (H - fs[1] * s) / 2 };
+  }
+
+  function draw() {
+    const W = cv.clientWidth, H = cv.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const r = fitRect(W, H);
+    if (!r || !snap.corners) return;
+    const map = boardMap(snap.corners);
+    const P = (u, v) => { const [x, y] = map(u, v); return [r.ox + x * r.s, r.oy + y * r.s]; };
+
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.beginPath();
+    for (let i = 0; i <= 8; i++) {
+      const [ax, ay] = P(i / 8, 0), [bx, by] = P(i / 8, 1);
+      ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      const [cx, cy] = P(0, i / 8), [dx, dy] = P(1, i / 8);
+      ctx.moveTo(cx, cy); ctx.lineTo(dx, dy);
+    }
+    ctx.stroke();
+
+    const g = snap.suggestion;
+    if (g && g.uci && g.uci.length >= 4) {
+      const centre = (sq) => P((sq.charCodeAt(0) - 97 + 0.5) / 8, (8 - Number(sq[1]) + 0.5) / 8);
+      const [x1, y1] = centre(g.uci.slice(0, 2));
+      const [x2, y2] = centre(g.uci.slice(2, 4));
+      const ang = Math.atan2(y2 - y1, x2 - x1);
+      const head = 20;
+      ctx.strokeStyle = 'rgba(255,201,77,0.95)';
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2 - Math.cos(ang) * head * 0.8, y2 - Math.sin(ang) * head * 0.8);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - head * Math.cos(ang - 0.45), y2 - head * Math.sin(ang - 0.45));
+      ctx.lineTo(x2 - head * Math.cos(ang + 0.45), y2 - head * Math.sin(ang + 0.45));
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function renderSnap() {
+    $('statusText').textContent = snap.status_label;
+    stage.style.setProperty('--c', STATUS_COLOR[snap.status] || '#7a8296');
+    $('best').textContent = snap.suggestion ? snap.suggestion.san : '';
+    draw();
+  }
+
+  new ResizeObserver(() => draw()).observe(stage);
+  img.addEventListener('error', () => {
+    setTimeout(() => { img.src = `/frame.mjpg?t=${Date.now()}`; }, 1000);
+  });
+
+  const es = new EventSource('/events');
+  es.addEventListener('open', () => {
+    if (img.naturalWidth === 0) img.src = `/frame.mjpg?t=${Date.now()}`;
+  });
+  es.addEventListener('snapshot', (e) => {
+    snap = JSON.parse(e.data);
+    renderSnap();
+  });
+})();
+</script>
+</body>
+</html>

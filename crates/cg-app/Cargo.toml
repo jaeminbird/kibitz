@@ -9,3 +9,18 @@ path = "src/main.rs"
 
 [dependencies]
 cg-core.workspace = true
+cg-engine.workspace = true
+cg-vision.workspace = true
+cg-capture.workspace = true
+cg-voice.workspace = true
+cg-llm.workspace = true
+cg-server.workspace = true
+shakmaty.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+jpeg-encoder.workspace = true
+image.workspace = true
+serde_json.workspace = true
