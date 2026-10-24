@@ -1,0 +1,11 @@
+[package]
+name = "cg-app"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "chessglass"
+path = "src/main.rs"
+
+[dependencies]
+cg-core.workspace = true

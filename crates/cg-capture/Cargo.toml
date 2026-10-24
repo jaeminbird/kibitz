@@ -1,0 +1,16 @@
+[package]
+name = "cg-capture"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+cg-core.workspace = true
+xcap.workspace = true
+image.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

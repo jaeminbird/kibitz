@@ -1,0 +1,20 @@
+[package]
+name = "cg-server"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+cg-core.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jpeg-encoder.workspace = true
+shakmaty.workspace = true
+tracing.workspace = true
+bytes = "1"
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["stream"] }

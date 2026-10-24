@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+cg-core = { path = "crates/cg-core" }
+cg-engine = { path = "crates/cg-engine" }
+cg-vision = { path = "crates/cg-vision" }
+cg-capture = { path = "crates/cg-capture" }
+cg-voice = { path = "crates/cg-voice" }
+cg-llm = { path = "crates/cg-llm" }
+cg-server = { path = "crates/cg-server" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+shakmaty = "0.30"
+clap = { version = "4", features = ["derive", "env"] }
+axum = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+base64 = "0.22"
+jpeg-encoder = "0.7"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+xcap = "0.9"
+rodio = "0.23"
+keyring = "4"
+sha2 = "0.10"
+dirs = "7"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Vision math must be fast even in debug/test builds.
+[profile.dev.package.cg-vision]
+opt-level = 3
+[profile.test.package.cg-vision]
+opt-level = 3

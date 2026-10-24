@@ -1,0 +1,10 @@
+[package]
+name = "cg-vision"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+cg-core.workspace = true
+shakmaty.workspace = true
+
+[dev-dependencies]

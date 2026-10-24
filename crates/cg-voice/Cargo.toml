@@ -1,0 +1,16 @@
+[package]
+name = "cg-voice"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+cg-core.workspace = true
+rodio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
