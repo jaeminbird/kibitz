@@ -2,7 +2,7 @@
 
 # kibitz
 
-**The onlooker who whispers the best move.**
+**Like the kibitzer over your shoulder, kibitz sees the board through your Meta glasses and whispers the best move.**
 
 Meta glasses watch the board. Stockfish thinks. The move is spoken in your ear.<br>
 **~8 ms** from the board going still to the move being spoken.
