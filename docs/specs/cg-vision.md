@@ -173,7 +173,8 @@ Algorithm for `track`:
 3. **Validate:** warp with the new corners at sq_px = 16, compute `checker_score`. If < min_checker, this frame is a miss: return None and keep all state.
 4. On success, update the coarse reference to this frame, store the new corners, and reset the miss count.
 5. **Misses widen the search.** After 1 and 2 consecutive misses the global-shift window is ±2·search_px and ±4·search_px. From the 3rd consecutive miss on, every attempt searches the whole frame: the best few SAD minima at 4× coarse_scale (plus the ±4·search_px window) are each refined as in steps 1–2, and the candidate with the highest `checker_score` wins. Any re-acquisition after a miss also needs ≥ 3 corners whose template NCC reaches 0.5, so a board seen one square off cannot be adopted.
-6. The tracker never drops its state on its own. `clear()` does that; cg-app calls it when tracking has failed for longer than its grace period (1.5 s).
+6. **Frame-size change** (stream renegotiation, window resize, DPI change): before step 1, scale the stored corners, reset corners and velocities by the per-axis size ratio, sample the corner templates at the new scale (the sample grid is resized to cover the same part of the scene), and resample the coarse and scale-2 references to the new sizes. Then track as usual. A size change never drops the track.
+7. The tracker never drops its state on its own. `clear()` does that; cg-app calls it when tracking has failed for longer than its grace period (1.5 s).
 - Cost target: `track` under 4 ms on 1280×720 (release). Corner templates stay fixed (no drift); only the coarse reference updates.
 - Tests (use `crate::synth` if part A has landed, or else your own simple renderer: checkerboard + frame on a textured background):
   - `checker_score` > 0.6 for a correctly warped synthetic board with the start position. It is negative for corners rotated by one place (a1 ↔ a8 swapped orientation flips the colors).
@@ -181,6 +182,7 @@ Algorithm for `track`:
   - A small rotation (2°/frame for 5 frames) stays within 3 px.
   - A frame with the board fully replaced by background → None, with the corners kept; the next frame showing the board tracks again.
   - 1, 2, 3 and 10 garbage frames (noise, flat gray, tone-inverted board) inserted into a drifting sequence, with the camera jumping meanwhile: each garbage frame → None, and tracking resumes within 2 px on the first good frame.
+  - The same scene at 1280×720 → 640×360 → 1920×1080 → 1280×720 → 960×720 (aspect change) → 1280×720: tracked within 2 px at every size. A miss at a new size keeps the corners, rescaled.
 
 ---
 

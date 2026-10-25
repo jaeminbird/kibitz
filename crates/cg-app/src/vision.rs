@@ -37,6 +37,8 @@ pub struct VisionPipeline {
     gate: StabilityGate,
     infer_cfg: InferConfig,
     corners: Option<Corners>,
+    /// Frame size `corners` are expressed in.
+    dims: (u32, u32),
     reference: Option<SquareStats>,
     failing_since: Option<Instant>,
     pub last_frame_ms: f32,
@@ -49,6 +51,7 @@ impl VisionPipeline {
             gate: StabilityGate::new(GateConfig { settle_ms, ..GateConfig::default() }),
             infer_cfg: InferConfig::default(),
             corners: None,
+            dims: (0, 0),
             reference: None,
             failing_since: None,
             last_frame_ms: 0.0,
@@ -72,6 +75,7 @@ impl VisionPipeline {
         self.tracker.reset(&frame.gray, frame.width, frame.height, corners);
         self.gate.reset();
         self.corners = Some(corners);
+        self.dims = (frame.width, frame.height);
         self.reference = None;
         self.failing_since = None;
     }
@@ -104,8 +108,15 @@ impl VisionPipeline {
     }
 
     fn process_inner(&mut self, frame: &Frame, pos: &Chess) -> Outcome {
-        if self.corners.is_none() {
+        let Some(known) = self.corners else {
             return Outcome::NoBoard;
+        };
+        if (frame.width, frame.height) != self.dims {
+            // The stream changed resolution (renegotiation, window resize, DPI change). Keep the
+            // calibration in the new pixel grid; the tracker rescales its own state the same way.
+            let (sx, sy) = (frame.width as f32 / self.dims.0.max(1) as f32, frame.height as f32 / self.dims.1.max(1) as f32);
+            self.corners = Some(Corners(known.0.map(|[x, y]| [x * sx, y * sy])));
+            self.dims = (frame.width, frame.height);
         }
         let Some(corners) = self.tracker.track(&frame.gray, frame.width, frame.height) else {
             // The tracker keeps its state and searches wider on each miss; give it LOST_AFTER to recover.
@@ -156,10 +167,41 @@ mod tests {
     const DT: Duration = Duration::from_millis(66);
 
     fn board_frame(seq: u64, at: Instant) -> (Frame, Corners) {
-        let p = synth::default_params(W, H);
-        let mut f = Frame::from_gray(seq, W, H, synth::render(Chess::default().board(), &p));
+        board_frame_sized(seq, at, W, H)
+    }
+
+    fn board_frame_sized(seq: u64, at: Instant, w: u32, h: u32) -> (Frame, Corners) {
+        let p = synth::default_params(w, h);
+        let mut f = Frame::from_gray(seq, w, h, synth::render(Chess::default().board(), &p));
         f.at = at;
         (f, p.corners)
+    }
+
+    fn max_err(a: Corners, b: Corners) -> f32 {
+        a.0.iter().zip(b.0.iter()).map(|(p, q)| (p[0] - q[0]).hypot(p[1] - q[1])).fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn resolution_change_rescales_corners_and_keeps_tracking() {
+        let pos = Chess::default();
+        let t0 = Instant::now();
+        let mut vision = VisionPipeline::new(300);
+        let (first, corners) = board_frame(1, t0);
+        vision.set_corners(&first, corners);
+        // A garbage frame at the new size: the published corners must already match that size.
+        let mut garbage = Frame::from_gray(2, W / 2, H / 2, vec![128; (W * H / 4) as usize]);
+        garbage.at = t0 + DT;
+        assert!(matches!(vision.process(&garbage, &pos), Outcome::Searching));
+        let half = Corners(corners.0.map(|[x, y]| [x * 0.5, y * 0.5]));
+        assert!(max_err(vision.corners().unwrap(), half) < 1e-3);
+        // The board at the new size: tracking continues, no loss and no re-locate needed.
+        let (small, truth) = board_frame_sized(3, t0 + DT * 2, W / 2, H / 2);
+        assert!(matches!(vision.process(&small, &pos), Outcome::Moving | Outcome::Settling));
+        assert!(max_err(vision.corners().unwrap(), truth) <= 2.0);
+        // And back up.
+        let (big, truth) = board_frame_sized(4, t0 + DT * 3, W * 3 / 2, H * 3 / 2);
+        assert!(matches!(vision.process(&big, &pos), Outcome::Moving | Outcome::Settling));
+        assert!(max_err(vision.corners().unwrap(), truth) <= 2.0);
     }
 
     fn garbage_frame(seq: u64, at: Instant) -> Frame {

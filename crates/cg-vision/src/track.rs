@@ -63,7 +63,7 @@ impl Default for TrackerConfig {
 
 pub struct CornerTracker {
     cfg: TrackerConfig,
-    /// Frame size the state belongs to. A different size loses the track.
+    /// Frame size the state belongs to. A different size rescales the state (see `rescale`).
     dims: (u32, u32),
     /// Corners of the last accepted frame; `None` when not tracking.
     corners: Option<Corners>,
@@ -128,15 +128,14 @@ impl CornerTracker {
     /// or replaced by [`CornerTracker::reset`].
     pub fn track(&mut self, gray: &[u8], width: u32, height: u32) -> Option<Corners> {
         self.last_score = 0.0;
-        let prev = self.corners?;
-        if self.templates.len() != 4 {
-            return None;
-        }
-        if (width, height) != self.dims {
-            self.clear();
+        if self.corners.is_none() || self.templates.len() != 4 {
             return None;
         }
         assert!(gray.len() >= width as usize * height as usize, "tracker: short buffer");
+        if (width, height) != self.dims {
+            self.rescale(width, height);
+        }
+        let prev = self.corners?;
         let (w, h) = (width as usize, height as usize);
         let c = self.coarse_scale();
         let (half, coarse) = pyramid(gray, w, h, c);
@@ -211,6 +210,26 @@ impl CornerTracker {
         self.coarse_ref = Plane::default();
         self.velocity = [[0.0; 2]; 4];
         self.misses = 0;
+    }
+
+    /// The frame size changed (the stream renegotiated its resolution, or the captured window was
+    /// resized). Map all state into the new pixel grid by the size ratio, so tracking continues:
+    /// corners and velocities are scaled, templates are sampled at the new scale, and the reference
+    /// images are resampled to the new pyramid sizes.
+    fn rescale(&mut self, width: u32, height: u32) {
+        let (ow, oh) = self.dims;
+        let (sx, sy) = (width as f32 / ow.max(1) as f32, height as f32 / oh.max(1) as f32);
+        let scale = |c: Corners| Corners(c.0.map(|[x, y]| [x * sx, y * sy]));
+        self.corners = self.corners.map(scale);
+        self.reset_corners = scale(self.reset_corners);
+        self.velocity = self.velocity.map(|[x, y]| [x * sx, y * sy]);
+        for t in &mut self.templates {
+            t.scale = [t.scale[0] * sx, t.scale[1] * sy];
+        }
+        let (half, coarse) = pyramid_dims(width as usize, height as usize, self.coarse_scale());
+        self.half_ref = resample(&self.half_ref, half.0, half.1);
+        self.coarse_ref = resample(&self.coarse_ref, coarse.0, coarse.1);
+        self.dims = (width, height);
     }
 
     /// Record a failed frame, keeping the state for the next attempt.
@@ -393,6 +412,38 @@ fn pyramid(gray: &[u8], w: usize, h: usize, c: usize) -> (Plane, Plane) {
     (half, coarse)
 }
 
+/// Sizes of the two planes `pyramid` builds for a `w × h` frame.
+fn pyramid_dims(w: usize, h: usize, c: usize) -> ((usize, usize), (usize, usize)) {
+    let half = (w / 2, h / 2);
+    let coarse = if c.is_multiple_of(2) { (half.0 / (c / 2), half.1 / (c / 2)) } else { (w / c, h / c) };
+    (half, coarse)
+}
+
+/// Bilinear resample of `src` to `w × h`, pixel centres aligned. A box average would alias less
+/// on large reductions, but this only runs once per resolution change.
+fn resample(src: &Plane, w: usize, h: usize) -> Plane {
+    if src.w == 0 || src.h == 0 || w == 0 || h == 0 {
+        return Plane { w, h, data: vec![0; w * h] };
+    }
+    let (fx, fy) = (src.w as f32 / w as f32, src.h as f32 / h as f32);
+    let mut data = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let sy = ((y as f32 + 0.5) * fy - 0.5).clamp(0.0, (src.h - 1) as f32);
+        let (y0, ty) = (sy.floor() as usize, sy.fract());
+        let y1 = (y0 + 1).min(src.h - 1);
+        for x in 0..w {
+            let sx = ((x as f32 + 0.5) * fx - 0.5).clamp(0.0, (src.w - 1) as f32);
+            let (x0, tx) = (sx.floor() as usize, sx.fract());
+            let x1 = (x0 + 1).min(src.w - 1);
+            let at = |xx: usize, yy: usize| src.data[yy * src.w + xx] as f32;
+            let top = at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx;
+            let bot = at(x0, y1) * (1.0 - tx) + at(x1, y1) * tx;
+            data.push((top * (1.0 - ty) + bot * ty).round() as u8);
+        }
+    }
+    Plane { w, h, data }
+}
+
 /// Bounding box `[x0, y0, x1, y1]` of the corners, scaled about its centre by `factor`.
 fn shrunk_bbox(corners: &Corners, factor: f32) -> [f32; 4] {
     let xs = corners.0.map(|p| p[0]);
@@ -479,8 +530,10 @@ struct Template {
     /// Raw `side × side` patch centred on the rounded corner, big enough to rotate the sample grid.
     raw: Vec<f32>,
     side: usize,
-    /// Offset of the true corner from the integer template centre.
+    /// Offset of the true corner from the integer template centre, in raw-patch pixels.
     frac: [f32; 2],
+    /// Current frame pixels per raw-patch pixel, per axis. 1 until the frame size changes.
+    scale: [f32; 2],
 }
 
 /// Zero-mean samples of a template at one board rotation, ready for NCC.
@@ -516,28 +569,40 @@ impl Template {
             }
         }
         let frac = [corner[0] - cx as f32, corner[1] - cy as f32];
-        Template { n, step, half, raw, side, frac }
+        Template { n, step, half, raw, side, frac, scale: [1.0, 1.0] }
     }
 
-    /// The template as it appears when the board is rotated by `phi` (radians, image
-    /// coordinates) about the corner. Each sample is read from the raw patch at the
-    /// position it came from, `R(-phi)·offset`, using bilinear interpolation.
+    /// The template as it appears in the current frame when the board is rotated by `phi`
+    /// (radians, image coordinates) about the corner. Each sample is read from the raw patch at
+    /// the position it came from, `S⁻¹·R(-phi)·offset` (`S` = `scale`), using bilinear
+    /// interpolation. After a frame-size change the sample grid is resized so it still covers
+    /// the same part of the scene.
     fn sample(&self, phi: f32) -> Sampled {
         let (s, c) = (-phi).sin_cos();
         let rad = (self.side / 2) as f32;
-        let mut samples = Vec::with_capacity(self.n * self.n);
-        for j in 0..self.n {
-            for i in 0..self.n {
-                let ox = (i * self.step) as f32 - self.half as f32;
-                let oy = (j * self.step) as f32 - self.half as f32;
+        let iso = (self.scale[0] * self.scale[1]).sqrt();
+        let (n, step, half) = if self.scale == [1.0, 1.0] {
+            (self.n, self.step, self.half)
+        } else {
+            let step = ((self.step as f32 * iso).round() as usize).max(1);
+            let n = (((self.n * self.step) as f32 * iso / step as f32).round() as usize).max(2);
+            (n, step, n * step / 2)
+        };
+        let mut samples = Vec::with_capacity(n * n);
+        for j in 0..n {
+            for i in 0..n {
+                let ox = (i * step) as f32 - half as f32;
+                let oy = (j * step) as f32 - half as f32;
                 let (qx, qy) = (c * ox - s * oy, s * ox + c * oy);
+                let (qx, qy) = (qx / self.scale[0], qy / self.scale[1]);
                 samples.push(bilinear(&self.raw, self.side, rad + qx, rad + qy) as f64);
             }
         }
-        let mean = samples.iter().sum::<f64>() / (self.n * self.n) as f64;
+        let mean = samples.iter().sum::<f64>() / (n * n) as f64;
         samples.iter_mut().for_each(|v| *v -= mean);
         let norm = samples.iter().map(|v| v * v).sum();
-        Sampled { n: self.n, step: self.step, half: self.half, samples, norm, frac: self.frac }
+        let frac = [self.frac[0] * self.scale[0], self.frac[1] * self.scale[1]];
+        Sampled { n, step, half, samples, norm, frac }
     }
 }
 
@@ -949,7 +1014,11 @@ mod tests {
     /// A frame from `crate::synth` with the board at `corners`. The background stays fixed
     /// (seed 1) and the pixel noise changes with `noise_seed`.
     fn synth_frame(board: &Board, corners: Corners, noise_seed: u64) -> Vec<u8> {
-        let p = crate::synth::SynthParams { corners, noise: 0.0, ..crate::synth::default_params(W, H) };
+        synth_frame_sized(board, corners, W, H, noise_seed)
+    }
+
+    fn synth_frame_sized(board: &Board, corners: Corners, w: u32, h: u32, noise_seed: u64) -> Vec<u8> {
+        let p = crate::synth::SynthParams { corners, noise: 0.0, ..crate::synth::default_params(w, h) };
         let mut img = crate::synth::render(board, &p);
         let mut rng = crate::synth::Rng::new(noise_seed);
         for px in img.iter_mut() {
@@ -1038,15 +1107,51 @@ mod tests {
     }
 
     #[test]
-    fn untracked_or_resized_input_is_lost() {
+    fn untracked_input_is_none() {
         let board = start_board();
         let base = start_corners();
         let frame = render_board(&board, base, 40);
         let mut tracker = CornerTracker::new(TrackerConfig::default());
         assert!(tracker.track(&frame, W, H).is_none(), "no reset yet");
-        tracker.reset(&frame, W, H, base);
-        assert!(tracker.track(&frame[..(640 * 360) as usize], 640, 360).is_none(), "size change");
         assert!(tracker.corners().is_none());
+    }
+
+    #[test]
+    fn follows_board_through_resolution_changes() {
+        let board = start_board();
+        // The same scene rendered at several stream resolutions, including an aspect change.
+        // `synth` scales the background with the frame, like a renegotiated video stream.
+        let at = |w: u32, h: u32, dx: f32, seed: u64| {
+            let (sx, sy) = (w as f32 / W as f32, h as f32 / H as f32);
+            let base = crate::synth::default_params(W, H).corners;
+            let corners = Corners(base.0.map(|[x, y]| [(x + dx) * sx, y * sy]));
+            (synth_frame_sized(&board, corners, w, h, seed), corners)
+        };
+        let (first, corners) = at(W, H, 0.0, 1);
+        let mut tracker = CornerTracker::new(TrackerConfig::default());
+        tracker.reset(&first, W, H, corners);
+        let sizes = [(640, 360), (640, 360), (1920, 1080), (1280, 720), (960, 720), (1280, 720)];
+        for (k, &(w, h)) in sizes.iter().enumerate() {
+            let (frame, truth) = at(w, h, 4.0 * (k + 1) as f32, 10 + k as u64);
+            let got = tracker.track(&frame, w, h).unwrap_or_else(|| panic!("frame {k} at {w}x{h}: lost track"));
+            let err = max_corner_error(got, truth);
+            println!("resolution frame {k} at {w}x{h}: max corner error {err:.2} px");
+            assert!(err <= 2.0, "frame {k} at {w}x{h}: error {err:.2}");
+        }
+    }
+
+    #[test]
+    fn resolution_change_during_a_miss_keeps_the_rescaled_track() {
+        let board = start_board();
+        let base = crate::synth::default_params(W, H).corners;
+        let mut tracker = CornerTracker::new(TrackerConfig::default());
+        tracker.reset(&synth_frame(&board, base, 1), W, H, base);
+        // A garbage frame arrives at the new size: a miss, but the kept corners are in the new pixels.
+        assert!(tracker.track(&vec![128; 640 * 360], 640, 360).is_none());
+        let half = Corners(base.0.map(|[x, y]| [x * 0.5, y * 0.5]));
+        assert!(max_corner_error(tracker.corners().unwrap(), half) < 1e-3);
+        let got = tracker.track(&synth_frame_sized(&board, half, 640, 360, 2), 640, 360).expect("resumes");
+        assert!(max_corner_error(got, half) <= 2.0);
     }
 
     #[test]

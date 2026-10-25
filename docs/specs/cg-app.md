@@ -23,7 +23,7 @@ State: `GameState`, `paused`, `corners: Option<Corners>`, `CornerTracker`, `Stab
 Per new frame (watch changed):
 1. If paused / game over → skip.
 2. If no corners → `LookingForBoard`. If the LLM is enabled and not busy and ≥ 5 s since the last attempt → spawn `locate_board`. Manual `SetCorners` is always accepted.
-3. Track: `tracker.track(frame)`. A None keeps the tracker's state, and it retries on later frames with a wider search. None for > 1.5 s → `LostTrack("board not visible")`, clear corners and `tracker.clear()` (falls back to step 2).
+3. Track: `tracker.track(frame)`. A None keeps the tracker's state, and it retries on later frames with a wider search. None for > 1.5 s → `LostTrack("board not visible")`, clear corners and `tracker.clear()` (falls back to step 2). If the frame size changed, the calibrated corners are first rescaled by the size ratio (the tracker rescales its own state), so a resolution change does not lose the board.
 4. Warp the board (sq_px 32) and push the **warped board** into the gate. The gate looks only at the board, so movement elsewhere in the room doesn't block reading.
 5. If there is no reference yet and the gate is Stable → reference = stats(warped); status = turn status; if it's my turn, request a suggestion.
 6. On `Stable{fresh:true}`: diff vs reference → `infer_move`. Emit a `Frame` event.
