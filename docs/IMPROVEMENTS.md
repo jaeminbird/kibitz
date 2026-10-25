@@ -8,6 +8,13 @@ Severity: **H** breaks a real game or exposes data · **M** degrades behaviour o
 
 ## 1. Fix first: bugs that break a real game
 
+> **Status (2026-10-25): all of 1.1–1.8 fixed**, each with regression tests (commits `54a9f34`..`38183b5`). Corrections found while fixing are noted inline. Follow-ups still open:
+> - An LLM-picked move still re-baselines unchecked. A second move made while the LLM answers can be lost unless two-ply inference resolves it.
+> - Two-ply promotions are never accepted (the piece is not visible); they fall back to "Didn't catch that move".
+> - A hand resting on the board for more than 4 s can trigger a false "Didn't catch that move".
+> - There is no end-to-end orchestrator test yet (needs `fake-uci` moved into cg-app, see section 5).
+> - The engine spec says the handshake sets `Ponder=true`; the code never does (Stockfish doesn't need it for `go ponder`).
+
 ### 1.1 [H] Tracker never re-acquires after a single failed frame (**verified**)
 - **Where:** `crates/cg-vision/src/track.rs:105-149`, `clear()` at `:177`.
 - **What:** any failure in `track()` (global shift, warp, or checker score below `min_checker`) calls `clear()`, which drops the corners and templates. The next call returns `None` at `let prev = self.corners?`. The 1.5 s grace period in `cg-app/src/vision.rs:16,109-111` assumes retries, so it is dead code. One blurred frame, a hand over a corner, or a codec keyframe loses the board until an LLM locate or a manual click. The root cause is the spec wording "None = lost (also clears state)".
@@ -21,7 +28,7 @@ Severity: **H** breaks a real game or exposes data · **M** degrades behaviour o
 
 ### 1.3 [H] DNS rebinding can read the command center (**verified**)
 - **Where:** `crates/cg-server/src/lib.rs:96-105`. There is no `Host` header check on any route.
-- **What:** a malicious page that rebinds its hostname to 127.0.0.1 can GET `/frame.jpg`, `/frame.mjpg` (camera frames of the room) and `/events` (game state and log). POST `/control` is still protected by the Origin and JSON content-type gates (`control.rs:223-239`).
+- **What:** a malicious page that rebinds its hostname to 127.0.0.1 can GET `/frame.jpg`, `/frame.mjpg` (camera frames of the room) and `/events` (game state and log). POST `/control` is still protected by the Origin and JSON content-type gates (`control.rs:17-55`; the original reference was wrong).
 - **Fix:** middleware on every route that rejects any `Host` other than `127.0.0.1:<port>` or `localhost:<port>` with 403. Add a test.
 
 ### 1.4 [H] A missed read freezes the game
@@ -112,7 +119,7 @@ All testing so far uses synthetic renders: flat discs, no lean, shadow, glare or
 | M | LLM spend is counted only on success; a billed call that times out or retries is missed | `orchestrator.rs:440,454`; `cg-llm/src/lib.rs:283` | Estimate and charge on error paths |
 | L-M | Frame channel closing is silent (status freezes) | `orchestrator.rs:139` | Emit an error and set a status |
 | L-M | Shutdown: `ctrl_c()` is re-created per loop iteration; a second Ctrl-C has no listener during shutdown; the speech thread is not joined; `Engine::shutdown()` is never called | `orchestrator.rs:145`, `main.rs:210` | One signal task feeding a `CancellationToken`; bounded joins; explicit engine shutdown |
-| L | `SetCorners` accepts a degenerate quad (the LLM path validates; the manual path does not) | `cg-server/src/control.rs:261-268` | Reuse `validate_corners` |
+| ~~L~~ done | `SetCorners` accepted a degenerate quad. The manual path already checked range; only the area check was missing | `cg-server/src/control.rs:77-84` | Done: the check moved to `cg_core::validate_corners`, used by both paths |
 | L | Keyring read errors are swallowed as "no key" | `cg-llm/src/lib.rs:424` | Log the error. (Persistence itself works: keyring 4's default `v1` mode picks the OS store automatically. **Verified.**) |
 | L | Event log, `frames/` and PGN writes grow without bound; the bus mutex is held during disk writes | `cg-core/src/bus.rs:76-79`; `orchestrator.rs:652` | `tracing-appender` non-blocking writer, rotation, and a frame cap |
 | L | Snapshot published every 250 ms with the full move list, serialized once per SSE client | `orchestrator.rs:583-592`; `cg-server/src/lib.rs:127` | Publish on change only; serialize once in the bus |
@@ -276,12 +283,11 @@ All testing so far uses synthetic renders: flat discs, no lean, shadow, glare or
 
 ## 6. Open admin items
 
-- **GitHub contributors sidebar still shows Claude.**
-  - The API already lists only `jaeminbird`, and history has no co-author trailers, so this is GitHub's cached view of the first push.
-  - **Fix:** run `gh auth refresh -h github.com -s delete_repo`, then delete and recreate `jaeminbird/kibitz`.
-  - When recreating, restore the About text "A real-time chess companion for Meta glasses, written in Rust." and the topics chess, stockfish, rust, computer-vision, low-latency, meta-glasses, then push the clean history.
-  - This also removes old commits that are still reachable by SHA.
-- **Line-ending normalisation** (5) could be folded into the history rewrite at the same time, if wanted.
+- ~~**GitHub contributors sidebar still shows Claude.**~~ **Fixed 2026-10-25 without deleting the repo.**
+  - The sidebar is a server-side cache keyed on the default branch's head SHA. Pointing the default branch at a new commit (via a temporary default branch) made GitHub recompute it.
+  - Playbook and script: private repo `jaeminbird/github-playbooks` (`remove-ghost-contributor.md`).
+  - Old commits may still be reachable by SHA until GitHub garbage-collects them. GitHub Support can force that.
+- **Line-ending normalisation** (5) is still open.
 
 ## 7. Suggested order
 
