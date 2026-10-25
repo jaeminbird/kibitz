@@ -149,8 +149,13 @@ impl CornerTracker {
     /// Adopt `corners` as truth for this frame. Stores corner templates (kept for life → no drift)
     /// and a coarse reference image (updated after every successful track).
     pub fn reset(&mut self, gray: &[u8], width: u32, height: u32, corners: cg_core::Corners);
-    /// Follow the board into this frame. None = lost (also clears state).
+    /// Follow the board into this frame. None = not found in this frame only: corners, templates
+    /// and the coarse reference are kept, and the next call searches more widely.
     pub fn track(&mut self, gray: &[u8], width: u32, height: u32) -> Option<cg_core::Corners>;
+    /// Consecutive failed frames since the last accepted one.
+    pub fn misses(&self) -> u32;
+    /// Drop all tracking state. Called by the app when it declares the board lost.
+    pub fn clear(&mut self);
     pub fn corners(&self) -> Option<cg_core::Corners>;
     /// Last checker score computed by track().
     pub fn last_score(&self) -> f32;
@@ -165,14 +170,17 @@ pub fn checker_score(b: &WarpedBoard) -> f32;
 Algorithm for `track`:
 1. **Global shift:** downscale the current frame by `coarse_scale` (box filter). SAD-match the bounding box of the previous corners (shrunk 10%) from the coarse reference against the current coarse frame, over shifts within ±search_px/coarse_scale. Then refine at scale 2 within ±2·(coarse_scale/2) of the coarse result. Result: (dx, dy) in full-res pixels.
 2. **Per-corner refine:** for each corner, search the template (taken at `reset`, centred on the corner) in the current frame within ±refine_px around `corner_at_reset + (current_shift_total)`. Use zero-mean NCC. Accept a corner only if NCC ≥ 0.5; otherwise use the shifted position.
-3. **Validate:** warp with the new corners at sq_px = 16, compute `checker_score`. If < min_checker, return None.
-4. On success, update the coarse reference to this frame and store the new corners.
+3. **Validate:** warp with the new corners at sq_px = 16, compute `checker_score`. If < min_checker, this frame is a miss: return None and keep all state.
+4. On success, update the coarse reference to this frame, store the new corners, and reset the miss count.
+5. **Misses widen the search.** After 1 and 2 consecutive misses the global-shift window is ±2·search_px and ±4·search_px. From the 3rd consecutive miss on, every attempt searches the whole frame: the best few SAD minima at 4× coarse_scale (plus the ±4·search_px window) are each refined as in steps 1–2, and the candidate with the highest `checker_score` wins. Any re-acquisition after a miss also needs ≥ 3 corners whose template NCC reaches 0.5, so a board seen one square off cannot be adopted.
+6. The tracker never drops its state on its own. `clear()` does that; cg-app calls it when tracking has failed for longer than its grace period (1.5 s).
 - Cost target: `track` under 4 ms on 1280×720 (release). Corner templates stay fixed (no drift); only the coarse reference updates.
 - Tests (use `crate::synth` if part A has landed, or else your own simple renderer: checkerboard + frame on a textured background):
   - `checker_score` > 0.6 for a correctly warped synthetic board with the start position. It is negative for corners rotated by one place (a1 ↔ a8 swapped orientation flips the colors).
   - Translate the camera by up to 40 px per frame over 10 frames: the tracked corners stay within 2 px of the truth.
   - A small rotation (2°/frame for 5 frames) stays within 3 px.
-  - A frame with the board fully replaced by background → None.
+  - A frame with the board fully replaced by background → None, with the corners kept; the next frame showing the board tracks again.
+  - 1, 2, 3 and 10 garbage frames (noise, flat gray, tone-inverted board) inserted into a drifting sequence, with the camera jumping meanwhile: each garbage frame → None, and tracking resumes within 2 px on the first good frame.
 
 ---
 

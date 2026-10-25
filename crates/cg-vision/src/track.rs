@@ -12,7 +12,12 @@
 //!    normalised cross-correlation (NCC) near where the shift predicts it, with
 //!    a parabolic sub-pixel fit on the NCC peak. This handles small rotations.
 //! 3. **Validate.** The board is re-warped and must still look like a
-//!    checkerboard (`checker_score`), otherwise the track is lost.
+//!    checkerboard (`checker_score`), otherwise this frame is a miss.
+//!
+//! A miss keeps all state. Each consecutive miss doubles the shift search window
+//! (`search_px`, ×2, ×4); after that every attempt searches the whole frame and
+//! keeps the candidate with the best `checker_score`. Only `clear` (called when
+//! the caller declares the board lost) or `reset` drops the track.
 //!
 //! See docs/specs/cg-vision.md (Part B).
 use cg_core::Corners;
@@ -28,6 +33,19 @@ const MIN_NCC: f64 = 0.5;
 
 /// How many extra search windows a corner may chase when its peak sits on the window edge.
 const MAX_CHASE: usize = 2;
+
+/// Consecutive misses that widen the local search (radius `search_px`, ×2, ×4). From then on
+/// every attempt is a whole-frame search.
+const WIDEN_STEPS: u32 = 3;
+
+/// The whole-frame search matches at `GLOBAL_FACTOR` × `coarse_scale` (scale 32 by default).
+const GLOBAL_FACTOR: usize = 4;
+
+/// How many whole-frame SAD minima are refined and scored.
+const GLOBAL_CANDIDATES: usize = 4;
+
+/// Corners whose template match must reach `MIN_NCC` to re-acquire the board after a miss.
+const MIN_MATCHED_REACQUIRE: usize = 3;
 
 pub struct TrackerConfig {
     pub coarse_scale: u32,
@@ -61,6 +79,8 @@ pub struct CornerTracker {
     /// Corners at `reset`; the templates were cut around these.
     reset_corners: Corners,
     last_score: f32,
+    /// Consecutive failed frames since the last accepted one; widens the search.
+    misses: u32,
 }
 
 impl CornerTracker {
@@ -75,6 +95,7 @@ impl CornerTracker {
             velocity: [[0.0; 2]; 4],
             reset_corners: Corners([[0.0; 2]; 4]),
             last_score: 0.0,
+            misses: 0,
         }
     }
 
@@ -97,13 +118,21 @@ impl CornerTracker {
         self.reset_corners = corners;
         self.velocity = [[0.0; 2]; 4];
         self.last_score = 0.0;
+        self.misses = 0;
     }
 
-    /// Follow the board into this frame. None = lost (also clears state).
+    /// Follow the board into this frame. `None` means the board was not found in *this* frame
+    /// only: the corners, templates and reference images are kept, and the next call searches
+    /// again, more widely after each consecutive miss (see [`CornerTracker::misses`]). The track
+    /// is dropped only by [`CornerTracker::clear`] (the caller decides when the board is lost)
+    /// or replaced by [`CornerTracker::reset`].
     pub fn track(&mut self, gray: &[u8], width: u32, height: u32) -> Option<Corners> {
         self.last_score = 0.0;
         let prev = self.corners?;
-        if (width, height) != self.dims || self.templates.len() != 4 {
+        if self.templates.len() != 4 {
+            return None;
+        }
+        if (width, height) != self.dims {
             self.clear();
             return None;
         }
@@ -112,48 +141,105 @@ impl CornerTracker {
         let c = self.coarse_scale();
         let (half, coarse) = pyramid(gray, w, h, c);
         if half.w < 8 || half.h < 8 {
-            self.clear();
-            return None;
+            return self.miss();
         }
 
-        // 1. Global shift of the whole board, in full-resolution pixels.
-        let Some((gx, gy)) = self.global_shift(&half, &coarse, &prev, c) else {
-            self.clear();
-            return None;
-        };
-
-        // 2. Per-corner refinement around the predicted position: previous corner + global
-        //    shift + the corner's residual motion from the last frame.
-        let g = [gx as f32, gy as f32];
         // The templates are rotated by the board's rotation since reset, measured on the last accepted corners.
         let phi = similarity_angle(&self.reset_corners, &prev);
-        let mut out = [[0f32; 2]; 4];
-        for (i, o) in out.iter_mut().enumerate() {
-            let p = prev.0[i];
-            let v = self.velocity[i];
-            let pred = [p[0] + g[0] + v[0], p[1] + g[1] + v[1]];
-            let sampled = self.templates[i].sample(phi);
-            *o = self.refine_corner(gray, w, h, &sampled, pred);
-            self.velocity[i] = [o[0] - p[0] - g[0], o[1] - p[1] - g[1]];
-        }
+        let sampled: Vec<Sampled> = self.templates.iter().map(|t| t.sample(phi)).collect();
 
-        // 3. The new corners must still show a checkerboard.
-        let Some(board) = warp_board(gray, width, height, &Corners(out), VALIDATE_SQ_PX) else {
-            self.clear();
-            return None;
+        let best = if self.misses < WIDEN_STEPS {
+            // 1. Global shift of the whole board, over a window that doubles with each consecutive miss.
+            let radius = self.cfg.search_px.max(1).saturating_mul(1 << self.misses);
+            self.global_shift(&half, &coarse, &prev, c, (0, 0), radius)
+                .and_then(|g| self.try_shift(gray, w, h, &prev, &sampled, g))
+        } else {
+            // Missed too often: search the whole frame. Candidate shifts come from a very coarse SAD
+            // map plus the widest local window; the one that looks most like a checkerboard wins.
+            let widest = self.cfg.search_px.max(1).saturating_mul(1 << (WIDEN_STEPS - 1));
+            let mut shifts: Vec<(i32, i32)> = self
+                .global_candidates(&coarse, &prev, c)
+                .into_iter()
+                .filter_map(|center_c| self.global_shift(&half, &coarse, &prev, c, center_c, (GLOBAL_FACTOR * c) as i32))
+                .collect();
+            shifts.extend(self.global_shift(&half, &coarse, &prev, c, (0, 0), widest));
+            shifts.sort_unstable();
+            shifts.dedup();
+            shifts
+                .into_iter()
+                .filter_map(|g| self.try_shift(gray, w, h, &prev, &sampled, g))
+                .filter(|cand| cand.matched >= MIN_MATCHED_REACQUIRE)
+                .max_by(|a, b| a.score.total_cmp(&b.score))
         };
-        let score = checker_score(&board);
-        self.last_score = score;
-        if score < self.cfg.min_checker {
-            self.clear();
-            return None;
+
+        let Some(cand) = best else {
+            return self.miss();
+        };
+        // While tracking normally an occluded corner may coast on its prediction. A re-acquisition
+        // after a miss must also match the corner templates: a board seen one square off (or with
+        // its tones flipped) can still pass the checker test.
+        if self.misses > 0 && cand.matched < MIN_MATCHED_REACQUIRE {
+            self.last_score = cand.score;
+            return self.miss();
+        }
+        // 3. The new corners must still show a checkerboard.
+        self.last_score = cand.score;
+        if cand.score < self.cfg.min_checker {
+            return self.miss();
         }
 
         // Accept: move the coarse reference forward; templates stay as they are.
-        self.corners = Some(Corners(out));
+        self.corners = Some(cand.corners);
+        self.velocity = cand.velocity;
         self.half_ref = half;
         self.coarse_ref = coarse;
-        Some(Corners(out))
+        self.misses = 0;
+        Some(cand.corners)
+    }
+
+    /// Consecutive frames `track` has failed on since the last accepted frame.
+    pub fn misses(&self) -> u32 {
+        self.misses
+    }
+
+    /// Drop the track: corners, templates and reference images. `track` returns `None` until
+    /// the next [`CornerTracker::reset`]. Call this when the board is declared lost.
+    pub fn clear(&mut self) {
+        self.corners = None;
+        self.templates.clear();
+        self.half_ref = Plane::default();
+        self.coarse_ref = Plane::default();
+        self.velocity = [[0.0; 2]; 4];
+        self.misses = 0;
+    }
+
+    /// Record a failed frame, keeping the state for the next attempt.
+    fn miss(&mut self) -> Option<Corners> {
+        self.misses = self.misses.saturating_add(1);
+        // After a gap, the last frame's corner motion says little about where the board is.
+        self.velocity = [[0.0; 2]; 4];
+        None
+    }
+
+    /// Steps 2 and 3 for one candidate global shift `g`: refine each corner around its prediction
+    /// (previous corner + shift + the corner's residual motion from the last frame), then score the
+    /// re-warped board. `None` when the board cannot be warped.
+    fn try_shift(&self, gray: &[u8], w: usize, h: usize, prev: &Corners, sampled: &[Sampled], g: (i32, i32)) -> Option<Candidate> {
+        let g = [g.0 as f32, g.1 as f32];
+        let mut corners = [[0f32; 2]; 4];
+        let mut velocity = [[0f32; 2]; 4];
+        let mut matched = 0;
+        for i in 0..4 {
+            let p = prev.0[i];
+            let v = self.velocity[i];
+            let pred = [p[0] + g[0] + v[0], p[1] + g[1] + v[1]];
+            let (o, ok) = self.refine_corner(gray, w, h, &sampled[i], pred);
+            matched += ok as usize;
+            corners[i] = o;
+            velocity[i] = [o[0] - p[0] - g[0], o[1] - p[1] - g[1]];
+        }
+        let board = warp_board(gray, w as u32, h as u32, &Corners(corners), VALIDATE_SQ_PX)?;
+        Some(Candidate { corners: Corners(corners), velocity, score: checker_score(&board), matched })
     }
 
     pub fn corners(&self) -> Option<Corners> {
@@ -174,23 +260,16 @@ impl CornerTracker {
         (self.cfg.patch_px as usize / 24).max(1)
     }
 
-    fn clear(&mut self) {
-        self.corners = None;
-        self.templates.clear();
-        self.half_ref = Plane::default();
-        self.coarse_ref = Plane::default();
-        self.velocity = [[0.0; 2]; 4];
-    }
-
     /// Translation of the board since the last accepted frame, in full-resolution pixels.
-    fn global_shift(&self, half: &Plane, coarse: &Plane, prev: &Corners, c: usize) -> Option<(i32, i32)> {
+    /// Searches `center_c ± radius`, with `center_c` in coarse pixels and `radius` in full-resolution pixels.
+    fn global_shift(&self, half: &Plane, coarse: &Plane, prev: &Corners, c: usize, center_c: (i32, i32), radius: i32) -> Option<(i32, i32)> {
         // Match the shrunk bounding box, so the board's background margin does not dominate.
         let bbox = shrunk_bbox(prev, 0.9);
 
-        // Coarse search, in coarse pixels, over ±search_px.
+        // Coarse search, in coarse pixels.
         let rect_c = plane_rect(bbox, c as f32, coarse.w, coarse.h)?;
-        let radius_c = (self.cfg.search_px / c as i32).max(1);
-        let (sx, sy) = sad_search(&self.coarse_ref, coarse, rect_c, (0, 0), radius_c)?;
+        let radius_c = (radius / c as i32).max(1);
+        let (sx, sy) = sad_search(&self.coarse_ref, coarse, rect_c, center_c, radius_c)?;
 
         // Refinement at scale 2, around the coarse estimate, ±c half-pixels (covers the coarse quantisation).
         let rect_h = plane_rect(bbox, 2.0, half.w, half.h)?;
@@ -200,11 +279,46 @@ impl CornerTracker {
         Some((hx * 2, hy * 2))
     }
 
-    /// Best NCC match of `t` near `pred`. Returns `pred` unchanged when no match reaches `MIN_NCC`.
+    /// Board shifts anywhere in the frame worth trying, in coarse pixels: the best few minima of
+    /// a SAD map computed `GLOBAL_FACTOR` times coarser than the coarse plane. Each is meant to be
+    /// refined by [`CornerTracker::global_shift`] with a radius covering that quantisation.
+    /// Empty when the board is too small to match at that scale.
+    fn global_candidates(&self, coarse: &Plane, prev: &Corners, c: usize) -> Vec<(i32, i32)> {
+        let f = GLOBAL_FACTOR;
+        let reference = downscale(&self.coarse_ref.data, self.coarse_ref.w, self.coarse_ref.h, f);
+        let current = downscale(&coarse.data, coarse.w, coarse.h, f);
+        let Some(rect) = plane_rect(shrunk_bbox(prev, 0.9), (c * f) as f32, reference.w, reference.h) else {
+            return Vec::new();
+        };
+        let (x0, y0, x1, y1) = rect;
+        let mut scored: Vec<(u64, i32, i32)> = Vec::new();
+        for dy in -(y0 as i32)..=current.h as i32 - y1 as i32 {
+            for dx in -(x0 as i32)..=current.w as i32 - x1 as i32 {
+                if let Some(sad) = sad_at(&reference, &current, rect, (dx, dy), 1) {
+                    scored.push((sad, dx, dy));
+                }
+            }
+        }
+        scored.sort_unstable_by_key(|&(sad, _, _)| sad);
+        // The best few, at least two cells apart, so one wide minimum does not fill the list.
+        let mut picked: Vec<(i32, i32)> = Vec::new();
+        for &(_, dx, dy) in &scored {
+            if picked.len() == GLOBAL_CANDIDATES {
+                break;
+            }
+            if picked.iter().all(|&(px, py)| (px - dx).abs().max((py - dy).abs()) >= 2) {
+                picked.push((dx, dy));
+            }
+        }
+        picked.into_iter().map(|(dx, dy)| (dx * f as i32, dy * f as i32)).collect()
+    }
+
+    /// Best NCC match of `t` near `pred`, and whether it reached `MIN_NCC`. Returns `pred`
+    /// unchanged (and `false`) when no match reaches `MIN_NCC`.
     ///
     /// The search window is `±refine_px` around the prediction. If the peak lands on the window edge
     /// the window is re-centred on it (up to `MAX_CHASE` times), so a fast corner is not clipped.
-    fn refine_corner(&self, gray: &[u8], w: usize, h: usize, t: &Sampled, pred: [f32; 2]) -> [f32; 2] {
+    fn refine_corner(&self, gray: &[u8], w: usize, h: usize, t: &Sampled, pred: [f32; 2]) -> ([f32; 2], bool) {
         let r = self.cfg.refine_px;
         let (mut cx, mut cy) = (pred[0].round() as i32, pred[1].round() as i32);
         let mut best = (f64::NEG_INFINITY, cx, cy);
@@ -217,7 +331,7 @@ impl CornerTracker {
             (cx, cy) = (best.1, best.2);
         }
         if best.0 < MIN_NCC {
-            return pred;
+            return (pred, false);
         }
         // Parabolic sub-pixel fit through the peak and its neighbours on each axis.
         let (bx, by) = (best.1, best.2);
@@ -232,8 +346,17 @@ impl CornerTracker {
         let dx = fit(ncc(gray, w, h, t, bx - 1, by), best.0, ncc(gray, w, h, t, bx + 1, by));
         let dy = fit(ncc(gray, w, h, t, bx, by - 1), best.0, ncc(gray, w, h, t, bx, by + 1));
         // The template was cut around a rounded corner; add back its fractional offset.
-        [bx as f32 + dx + t.frac[0], by as f32 + dy + t.frac[1]]
+        ([bx as f32 + dx + t.frac[0], by as f32 + dy + t.frac[1]], true)
     }
+}
+
+/// One tried global shift, after corner refinement and validation.
+struct Candidate {
+    corners: Corners,
+    velocity: [[f32; 2]; 4],
+    score: f32,
+    /// Corners whose template match reached `MIN_NCC`.
+    matched: usize,
 }
 
 /// Owned 8-bit image used for the search pyramid.
@@ -306,31 +429,41 @@ fn plane_rect(bbox: [f32; 4], scale: f32, pw: usize, ph: usize) -> Option<Rect> 
 /// Compares a subsampled grid (at most about 64 samples per side) to bound the cost.
 fn sad_search(reference: &Plane, current: &Plane, rect: Rect, center: (i32, i32), radius: i32) -> Option<(i32, i32)> {
     let (x0, y0, x1, y1) = rect;
-    let (rw, rh) = (x1 - x0, y1 - y0);
-    let step = (rw.max(rh) / 64).max(1);
+    let step = ((x1 - x0).max(y1 - y0) / 64).max(1);
     let mut best: Option<(u64, i32, i32)> = None;
     for dy in -radius..=radius {
         for dx in -radius..=radius {
             let (sx, sy) = (center.0 + dx, center.1 + dy);
-            let (cx0, cy0) = (x0 as i64 + sx as i64, y0 as i64 + sy as i64);
-            if cx0 < 0 || cy0 < 0 || cx0 as usize + rw > current.w || cy0 as usize + rh > current.h {
+            let Some(sad) = sad_at(reference, current, rect, (sx, sy), step) else {
                 continue;
-            }
-            let (cx0, cy0) = (cx0 as usize, cy0 as usize);
-            let mut sad = 0u64;
-            for ty in (0..rh).step_by(step) {
-                let rrow = &reference.data[(y0 + ty) * reference.w + x0..];
-                let crow = &current.data[(cy0 + ty) * current.w + cx0..];
-                for tx in (0..rw).step_by(step) {
-                    sad += rrow[tx].abs_diff(crow[tx]) as u64;
-                }
-            }
+            };
             if best.is_none_or(|(b, _, _)| sad < b) {
                 best = Some((sad, sx, sy));
             }
         }
     }
     best.map(|(_, sx, sy)| (sx, sy))
+}
+
+/// Sum of absolute differences between `rect` of `reference` and the same rect moved by `shift`
+/// in `current`, sampled every `step` pixels. `None` when the moved rect leaves `current`.
+fn sad_at(reference: &Plane, current: &Plane, rect: Rect, shift: (i32, i32), step: usize) -> Option<u64> {
+    let (x0, y0, x1, y1) = rect;
+    let (rw, rh) = (x1 - x0, y1 - y0);
+    let (cx0, cy0) = (x0 as i64 + shift.0 as i64, y0 as i64 + shift.1 as i64);
+    if cx0 < 0 || cy0 < 0 || cx0 as usize + rw > current.w || cy0 as usize + rh > current.h {
+        return None;
+    }
+    let (cx0, cy0) = (cx0 as usize, cy0 as usize);
+    let mut sad = 0u64;
+    for ty in (0..rh).step_by(step) {
+        let rrow = &reference.data[(y0 + ty) * reference.w + x0..];
+        let crow = &current.data[(cy0 + ty) * current.w + cx0..];
+        for tx in (0..rw).step_by(step) {
+            sad += rrow[tx].abs_diff(crow[tx]) as u64;
+        }
+    }
+    Some(sad)
 }
 
 /// A corner's appearance as it looked at `reset`: the raw pixels around the corner.
@@ -800,8 +933,108 @@ mod tests {
         tracker.reset(&render_board(&board, base, 30), W, H, base);
         let frame = render(&Scene { board: None, corners: base, bg_offset: (0.0, 0.0), bg_angle: 0.0, bg_center: [0.0, 0.0], noise: 2.0, noise_seed: 31 });
         assert!(tracker.track(&frame, W, H).is_none());
-        assert!(tracker.corners().is_none());
         assert!(tracker.last_score() < 0.35);
+        // A miss is for this frame only: the track is kept for the next one.
+        assert_eq!(tracker.corners(), Some(base));
+        assert_eq!(tracker.misses(), 1);
+        let back = tracker.track(&render_board(&board, base, 32), W, H).expect("board is back");
+        assert!(max_corner_error(back, base) <= 2.0);
+        assert_eq!(tracker.misses(), 0);
+        // Only an explicit clear drops it.
+        tracker.clear();
+        assert!(tracker.corners().is_none());
+        assert!(tracker.track(&render_board(&board, base, 33), W, H).is_none());
+    }
+
+    /// A frame from `crate::synth` with the board at `corners`. The background stays fixed
+    /// (seed 1) and the pixel noise changes with `noise_seed`.
+    fn synth_frame(board: &Board, corners: Corners, noise_seed: u64) -> Vec<u8> {
+        let p = crate::synth::SynthParams { corners, noise: 0.0, ..crate::synth::default_params(W, H) };
+        let mut img = crate::synth::render(board, &p);
+        let mut rng = crate::synth::Rng::new(noise_seed);
+        for px in img.iter_mut() {
+            let n = (rng.unit() + rng.unit() + rng.unit() + rng.unit() - 2.0) * 3f32.sqrt() * 2.0;
+            *px = (*px as f32 + n).round().clamp(0.0, 255.0) as u8;
+        }
+        img
+    }
+
+    /// A frame the tracker cannot use, cycling through three kinds: random noise, flat gray,
+    /// and the board with its tones inverted (light and dark squares swap, so it fails validation).
+    fn garbage_frame(board: &Board, corners: Corners, k: u64) -> Vec<u8> {
+        match k % 3 {
+            0 => {
+                let mut rng = crate::synth::Rng::new(1000 + k);
+                (0..W * H).map(|_| rng.below(256) as u8).collect()
+            }
+            1 => vec![128; (W * H) as usize],
+            _ => synth_frame(board, corners, 2000 + k).iter().map(|&p| 255 - p).collect(),
+        }
+    }
+
+    /// Track a drifting synthetic board, insert `garbage` unusable frames during which the camera
+    /// jumps by `jump`, then check the tracker picks the board up again and keeps following it.
+    fn resumes_after_garbage(garbage: u64, jump: (f32, f32)) {
+        let board = start_board();
+        let base = crate::synth::default_params(W, H).corners;
+        let mut tracker = CornerTracker::new(TrackerConfig::default());
+        tracker.reset(&synth_frame(&board, base, 1), W, H, base);
+        let (mut ox, mut oy) = (0f32, 0f32);
+        let mut seed = 2;
+        let mut follow = |tracker: &mut CornerTracker, ox: f32, oy: f32, what: &str| {
+            let truth = shift(base, ox, oy);
+            seed += 1;
+            let got = tracker.track(&synth_frame(&board, truth, seed), W, H).unwrap_or_else(|| panic!("{what}: lost track"));
+            let err = max_corner_error(got, truth);
+            assert!(err <= 2.0, "{what}: corner error {err:.2} px");
+            err
+        };
+        for k in 0..3 {
+            (ox, oy) = (ox + 6.0, oy + 3.0);
+            follow(&mut tracker, ox, oy, &format!("drift {k}"));
+        }
+        let before = tracker.corners();
+        for k in 0..garbage {
+            let frame = garbage_frame(&board, shift(base, ox, oy), k);
+            assert!(tracker.track(&frame, W, H).is_none(), "garbage frame {k} was accepted");
+            assert_eq!(tracker.corners(), before, "garbage frame {k} changed the kept corners");
+            assert_eq!(tracker.misses(), k as u32 + 1);
+        }
+        (ox, oy) = (ox + jump.0, oy + jump.1);
+        let err = follow(&mut tracker, ox, oy, "re-acquire");
+        println!("{garbage} garbage frames, jump {jump:?}: re-acquired with corner error {err:.2} px");
+        assert_eq!(tracker.misses(), 0);
+        for k in 0..3 {
+            (ox, oy) = (ox - 5.0, oy + 4.0);
+            follow(&mut tracker, ox, oy, &format!("after {k}"));
+        }
+    }
+
+    #[test]
+    fn resumes_after_1_garbage_frame() {
+        // Beyond the normal ±64 px window: needs the doubled one.
+        resumes_after_garbage(1, (90.0, -30.0));
+    }
+
+    #[test]
+    fn resumes_after_2_garbage_frames() {
+        resumes_after_garbage(2, (-200.0, 40.0));
+    }
+
+    #[test]
+    fn resumes_after_3_garbage_frames() {
+        // From the third miss on, the whole frame is searched.
+        resumes_after_garbage(3, (-180.0, 70.0));
+    }
+
+    #[test]
+    fn resumes_after_10_garbage_frames() {
+        resumes_after_garbage(10, (250.0, -100.0));
+    }
+
+    #[test]
+    fn resumes_in_place_after_10_garbage_frames() {
+        resumes_after_garbage(10, (0.0, 0.0));
     }
 
     #[test]
@@ -836,6 +1069,25 @@ mod tests {
         }
         let per = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
         println!("track 1280x720: {per:.3} ms per frame (spec target < 4 ms, release)");
+    }
+
+    #[test]
+    fn whole_frame_search_cost_1280x720() {
+        let board = start_board();
+        let base = start_corners();
+        let mut tracker = CornerTracker::new(TrackerConfig::default());
+        tracker.reset(&render_board(&board, base, 60), W, H, base);
+        let garbage = vec![128u8; (W * H) as usize];
+        for _ in 0..WIDEN_STEPS {
+            assert!(tracker.track(&garbage, W, H).is_none());
+        }
+        let iters = 10;
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            assert!(tracker.track(&garbage, W, H).is_none());
+        }
+        let per = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!("whole-frame search 1280x720 (miss): {per:.3} ms per frame");
     }
 }
 

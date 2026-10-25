@@ -76,7 +76,10 @@ impl VisionPipeline {
         self.failing_since = None;
     }
 
+    /// Drop the board location. This is the only place the tracker's state is cleared: a
+    /// failed `track` keeps it, so the tracker can re-acquire within the `LOST_AFTER` grace period.
     pub fn forget_board(&mut self) {
+        self.tracker.clear();
         self.corners = None;
         self.reference = None;
         self.failing_since = None;
@@ -105,6 +108,7 @@ impl VisionPipeline {
             return Outcome::NoBoard;
         }
         let Some(corners) = self.tracker.track(&frame.gray, frame.width, frame.height) else {
+            // The tracker keeps its state and searches wider on each miss; give it LOST_AFTER to recover.
             let since = *self.failing_since.get_or_insert(frame.at);
             if frame.at.duration_since(since) >= LOST_AFTER {
                 self.forget_board();
@@ -138,5 +142,71 @@ impl VisionPipeline {
                 Outcome::Read { inference, stats: Box::new(stats) }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cg_vision::synth;
+    use shakmaty::Position;
+
+    const W: u32 = 640;
+    const H: u32 = 480;
+    const DT: Duration = Duration::from_millis(66);
+
+    fn board_frame(seq: u64, at: Instant) -> (Frame, Corners) {
+        let p = synth::default_params(W, H);
+        let mut f = Frame::from_gray(seq, W, H, synth::render(Chess::default().board(), &p));
+        f.at = at;
+        (f, p.corners)
+    }
+
+    fn garbage_frame(seq: u64, at: Instant) -> Frame {
+        let mut f = Frame::from_gray(seq, W, H, vec![128; (W * H) as usize]);
+        f.at = at;
+        f
+    }
+
+    #[test]
+    fn tracking_resumes_within_grace_period() {
+        let pos = Chess::default();
+        let t0 = Instant::now();
+        let mut vision = VisionPipeline::new(300);
+        let (first, corners) = board_frame(1, t0);
+        vision.set_corners(&first, corners);
+        // About 0.7 s of unusable frames: inside LOST_AFTER, so the pipeline keeps searching.
+        for k in 1..=10u32 {
+            let out = vision.process(&garbage_frame(1 + k as u64, t0 + DT * k), &pos);
+            assert!(matches!(out, Outcome::Searching), "garbage frame {k}");
+            assert!(vision.corners().is_some(), "garbage frame {k} dropped the corners");
+        }
+        let (back, _) = board_frame(12, t0 + DT * 11);
+        let out = vision.process(&back, &pos);
+        assert!(matches!(out, Outcome::Moving | Outcome::Settling), "board did not resume");
+        assert!(vision.failing_since.is_none());
+    }
+
+    #[test]
+    fn board_is_lost_after_grace_period_and_tracker_cleared() {
+        let pos = Chess::default();
+        let t0 = Instant::now();
+        let mut vision = VisionPipeline::new(300);
+        let (first, corners) = board_frame(1, t0);
+        vision.set_corners(&first, corners);
+        let mut lost_at = None;
+        for k in 1..=30u32 {
+            if let Outcome::Lost = vision.process(&garbage_frame(1 + k as u64, t0 + DT * k), &pos) {
+                lost_at = Some(k);
+                break;
+            }
+        }
+        let k = lost_at.expect("never declared lost");
+        assert!(DT * (k - 1) >= LOST_AFTER, "lost after only {k} frames");
+        assert!(vision.corners().is_none());
+        // The tracker was cleared too, so it cannot silently bring the old corners back.
+        assert!(vision.tracker.corners().is_none());
+        let (back, _) = board_frame(100, t0 + DT * (k + 1));
+        assert!(matches!(vision.process(&back, &pos), Outcome::NoBoard));
     }
 }
