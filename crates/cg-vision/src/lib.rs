@@ -12,5 +12,5 @@ pub mod track;
 pub use features::{square_diff, square_stats, SquareStats};
 pub use gate::{GateConfig, GateState, StabilityGate};
 pub use geometry::{grid_to_square, square_to_grid, warp_board, GrayImage, Homography, WarpedBoard};
-pub use infer::{changed_squares, infer_move, InferConfig, Inference};
+pub use infer::{changed_squares, infer_move, infer_plies, InferConfig, Inference, PlyInference};
 pub use track::{checker_score, CornerTracker, TrackerConfig};

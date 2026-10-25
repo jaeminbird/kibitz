@@ -24,6 +24,9 @@ const ENGINE_RETRY: Duration = Duration::from_secs(1);
 const LOCATE_EVERY: Duration = Duration::from_secs(5);
 /// Unexplained reads in a row before declaring lost track.
 const UNEXPLAINED_LIMIT: u32 = 3;
+/// How long a missed (uncommitted) read may stay unresolved before we ask the
+/// user to enter the move.
+const MISSED_ANNOUNCE: Duration = Duration::from_secs(4);
 
 pub struct Config {
     pub my_color: Color,
@@ -66,6 +69,8 @@ struct Actor {
     ended: bool,
     lost: bool,
     unexplained: UnexplainedRun,
+    /// "Didn't catch that move" was said for the pending missed read.
+    missed_spoken: bool,
 
     suggestion: Option<Suggestion>,
     last_reply: Option<EngineReply>,
@@ -109,6 +114,7 @@ pub async fn run(
         ended: false,
         lost: false,
         unexplained: UnexplainedRun::default(),
+        missed_spoken: false,
         suggestion: None,
         last_reply: None,
         engine_inflight: false,
@@ -174,6 +180,29 @@ impl Actor {
                 self.dirty = true;
             }
             Outcome::Read { inference, stats } => self.on_read(&frame, inference, stats),
+            Outcome::Resync { plies, stats } => self.on_resync(&frame, plies, stats),
+        }
+    }
+
+    /// A line of plies explains the board since the reference (a read was missed): commit them in order.
+    fn on_resync(&mut self, frame: &Frame, plies: cg_vision::PlyInference, stats: Box<cg_vision::SquareStats>) {
+        self.bus.emit(EventKind::Frame {
+            seq: frame.seq,
+            changed_squares: plies.changed,
+            best: Some(plies.ucis.join(" ")),
+            margin: Some(plies.margin),
+            skipped: None,
+            vision_ms: self.vision.last_frame_ms,
+        });
+        self.unexplained.reset();
+        self.lost = false;
+        self.vision.commit_reference(stats);
+        self.settled_at = Some(frame.at);
+        for mv in plies.moves {
+            if self.game.outcome().is_some() {
+                break;
+            }
+            self.commit(mv, "vision", Some(plies.margin), Some(frame.at));
         }
     }
 
@@ -208,6 +237,11 @@ impl Actor {
             self.bus.emit(EventKind::Info { message: "promotion read as a queen; undo if it was another piece".into() });
             self.commit(mv, "vision", Some(inf.margin), Some(frame.at));
             return;
+        }
+        if inf.reason == Some("ambiguous") {
+            // Keep the reference: the next settled read is also tried over two
+            // plies against it, in case this was a real move nobody resolves.
+            self.vision.note_missed(frame.at);
         }
         match inf.reason {
             Some("ambiguous") if self.llm.is_some() && !self.llm_busy && !self.over_budget() => {
@@ -578,6 +612,19 @@ impl Actor {
     }
 
     fn on_tick(&mut self) {
+        // Last resort for a missed read that neither two-ply inference nor the
+        // LLM resolved: ask the user, once, to enter the move.
+        match self.vision.missed_since() {
+            None => self.missed_spoken = false,
+            Some(t) if !self.missed_spoken && !self.paused && !self.llm_busy && t.elapsed() >= MISSED_ANNOUNCE => {
+                self.missed_spoken = true;
+                self.bus.emit(EventKind::Info { message: "didn't catch the last move; enter it to continue".into() });
+                self.speaker.say("Didn't catch that move");
+                self.save_frame("missed");
+                self.dirty = true;
+            }
+            Some(_) => {}
+        }
         if self.engine_failed_at.is_some_and(|t| t.elapsed() >= ENGINE_RETRY) && !self.paused {
             self.engine_failed_at = None;
             self.maybe_request_suggestion();

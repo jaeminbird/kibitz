@@ -101,14 +101,7 @@ struct Group {
 
 /// Infer which legal move of `pos` explains the per-square change `diff`.
 pub fn infer_move(pos: &Chess, diff: &[f32; 64], cfg: &InferConfig) -> Inference {
-    // Threshold: the median is the typical unchanged square; a change must stand well above it.
-    let mut sorted = *diff;
-    sorted.sort_unstable_by(f32::total_cmp);
-    let median = (sorted[31] + sorted[32]) / 2.0;
-    let t = cfg.min_change.max(2.5 * median);
-    let excess: [f32; 64] = diff.map(|d| d - t);
-
-    let changed = excess.iter().filter(|&&e| e > 0.0).count() as u32;
+    let (excess, changed, _) = excess_over_threshold(diff, cfg);
     let mut out = Inference {
         best: None,
         best_uci: None,
@@ -169,6 +162,154 @@ pub fn infer_move(pos: &Chess, diff: &[f32; 64], cfg: &InferConfig) -> Inference
     out.accept = !piece_unknown && out.margin >= cfg.min_margin && out.residual <= cfg.max_residual;
     if !out.accept {
         let ambiguous = piece_unknown || out.margin < cfg.min_margin;
+        out.reason = Some(if ambiguous { "ambiguous" } else { "unexplained change" });
+    }
+    out
+}
+
+/// Per-square excess over the change threshold, the number of changed squares,
+/// and the threshold. The median is the typical unchanged square; a change must
+/// stand well above it.
+fn excess_over_threshold(diff: &[f32; 64], cfg: &InferConfig) -> ([f32; 64], u32, f32) {
+    let mut sorted = *diff;
+    sorted.sort_unstable_by(f32::total_cmp);
+    let median = (sorted[31] + sorted[32]) / 2.0;
+    let t = cfg.min_change.max(2.5 * median);
+    let excess: [f32; 64] = diff.map(|d| d - t);
+    let changed = excess.iter().filter(|&&e| e > 0.0).count() as u32;
+    (excess, changed, t)
+}
+
+/// Result of [`infer_plies`].
+#[derive(Clone, Debug)]
+pub struct PlyInference {
+    /// Best explanation, in play order (empty when nothing changed or no line fits).
+    pub moves: Vec<Move>,
+    pub ucis: Vec<String>,
+    pub score: f32,
+    /// Best score minus the best line whose changed squares are neither the same
+    /// set nor a superset of the best line's (see [`infer_plies`]).
+    pub margin: f32,
+    /// Sum of positive excess on squares the best line leaves alone.
+    pub residual: f32,
+    /// Number of squares whose diff exceeds the threshold.
+    pub changed: u32,
+    pub accept: bool,
+    /// When !accept: "no change" | "ambiguous" | "unexplained change" | "no legal moves"
+    pub reason: Option<&'static str>,
+}
+
+/// One distinct changed-square set over move sequences, and its best line.
+struct Line {
+    mask: u64,
+    score: f32,
+    moves: Vec<Move>,
+    /// Queen promotions in `moves` (prefer the queen when the piece is invisible).
+    queens: u32,
+    members: u32,
+}
+
+/// Squares whose occupant differs between two boards, as a bit mask (a1 = bit 0).
+fn board_change_mask(a: &shakmaty::Board, b: &shakmaty::Board) -> u64 {
+    (0..64u32).filter(|&s| a.piece_at(Square::new(s)) != b.piece_at(Square::new(s))).fold(0, |m, s| m | 1 << s)
+}
+
+fn collect_lines(pos: &Chess, root: &shakmaty::Board, plies: usize, line: &mut Vec<Move>, excess: &[f32; 64], out: &mut Vec<Line>) {
+    for mv in pos.legal_moves() {
+        line.push(mv);
+        let mut next = pos.clone();
+        next.play_unchecked(mv);
+        if plies > 1 {
+            collect_lines(&next, root, plies - 1, line, excess, out);
+        } else {
+            let mask = board_change_mask(root, next.board());
+            let queens = line.iter().filter(|m| m.promotion() == Some(Role::Queen)).count() as u32;
+            match out.iter_mut().find(|l| l.mask == mask) {
+                Some(l) => {
+                    l.members += 1;
+                    if queens > l.queens {
+                        l.moves.clone_from(line);
+                        l.queens = queens;
+                    }
+                }
+                None => {
+                    let score = (0..64).filter(|s| mask & (1 << s) != 0).map(|s| excess[s]).sum();
+                    out.push(Line { mask, score, moves: line.clone(), queens, members: 1 });
+                }
+            }
+        }
+        line.pop();
+    }
+}
+
+/// Like [`infer_move`], but the diff may span up to `max_plies` moves (1 or 2 in
+/// practice: a read that was missed, or moves made while the board was out of
+/// view). Tries exactly 1 ply, then exactly 2, … and returns the first accepted
+/// line, else the result for `max_plies`.
+///
+/// A line's changed squares are the squares whose occupant differs between
+/// `pos` and the position after the line, so a recapture on the square just
+/// moved to counts that square once. Lines are scored like moves in
+/// [`infer_move`]. One difference: a line whose squares are a strict superset of
+/// the best line's (the best line plus a capture of the piece that just moved,
+/// say) differs by one unchanged square only, so it is held to half of
+/// `min_margin` (the extra square must still clearly not have changed) and does
+/// not count toward `margin`. And a line of two or more plies is rejected if
+/// any of its squares clearly did not change (diff under half the threshold),
+/// so a resting hand is not read as an extra opponent move.
+pub fn infer_plies(pos: &Chess, diff: &[f32; 64], max_plies: usize, cfg: &InferConfig) -> PlyInference {
+    let (excess, changed, t) = excess_over_threshold(diff, cfg);
+    let mut out = PlyInference {
+        moves: Vec::new(),
+        ucis: Vec::new(),
+        score: 0.0,
+        margin: 0.0,
+        residual: 0.0,
+        changed,
+        accept: false,
+        reason: Some("no legal moves"),
+    };
+    if changed == 0 {
+        out.reason = Some("no change");
+        return out;
+    }
+    for plies in 1..=max_plies.max(1) {
+        let mut lines = Vec::new();
+        collect_lines(pos, pos.board(), plies, &mut Vec::with_capacity(plies), &excess, &mut lines);
+        lines.sort_by(|a, b| b.score.total_cmp(&a.score));
+        let Some(best) = lines.first() else { break };
+        let (mut other, mut superset) = (None::<f32>, None::<f32>);
+        for l in &lines[1..] {
+            let slot = if l.mask & best.mask == best.mask { &mut superset } else { &mut other };
+            slot.get_or_insert(l.score);
+        }
+        let margin = best.score - other.unwrap_or(0.0);
+        let superset_gap = superset.map_or(f32::MAX, |s| best.score - s);
+        let residual = (0..64).filter(|s| best.mask & (1 << s) == 0).map(|s| excess[s].max(0.0)).sum();
+        let piece_unknown = best.members > 1;
+        // A line of two or more plies must not claim a square that clearly did
+        // not change: otherwise any opponent move "explains" a resting hand at
+        // the cost of one quiet square.
+        let quiet_square = plies > 1 && (0..64).any(|s| best.mask & (1 << s) != 0 && excess[s] < -t / 2.0);
+        let accept = !piece_unknown
+            && !quiet_square
+            && margin >= cfg.min_margin
+            && superset_gap >= cfg.min_margin / 2.0
+            && residual <= cfg.max_residual;
+        out = PlyInference {
+            moves: best.moves.clone(),
+            ucis: best.moves.iter().map(|&m| uci(m)).collect(),
+            score: best.score,
+            margin,
+            residual,
+            changed,
+            accept,
+            reason: None,
+        };
+        if accept {
+            return out;
+        }
+        let ambiguous = piece_unknown || margin < cfg.min_margin || superset_gap < cfg.min_margin / 2.0;
         out.reason = Some(if ambiguous { "ambiguous" } else { "unexplained change" });
     }
     out
@@ -437,6 +578,105 @@ mod tests {
         println!("hand: {accepted} accepted, all correct");
     }
 
+    /// Synthetic diff for playing `line` from `pos`.
+    fn run_line(pos: &Chess, line: &[Move], seed: u64) -> PlyInference {
+        let mut after = pos.clone();
+        for &mv in line {
+            after.play_unchecked(mv);
+        }
+        let d = diff_between(pos.board(), after.board(), seed, None);
+        infer_plies(pos, &d, 2, &InferConfig::default())
+    }
+
+    #[test]
+    fn plies_read_two_moves_between_reads() {
+        // Two plies from every position of the random walk (and the special
+        // positions): the pair must be read, never a wrong line.
+        let mut rng = Rng::new(77);
+        let (mut correct, mut total) = (0usize, 0usize);
+        let mut wrong = Vec::new();
+        for (i, (pos, mv)) in e2e_cases().into_iter().enumerate().step_by(3) {
+            let mut mid = pos.clone();
+            mid.play_unchecked(mv);
+            let replies: Vec<Move> = mid.legal_moves().iter().copied().collect();
+            if replies.is_empty() {
+                continue;
+            }
+            let line = [mv, replies[rng.below(replies.len())]];
+            total += 1;
+            let inf = run_line(&pos, &line, 9000 + i as u64);
+            let want: Vec<String> = line.iter().map(|&m| uci(m)).collect();
+            if inf.accept {
+                if inf.ucis == want {
+                    correct += 1;
+                } else {
+                    let fen = Fen::from_position(&pos, EnPassantMode::Legal);
+                    wrong.push(format!("{fen} played {want:?}, accepted {:?}", inf.ucis));
+                }
+            }
+        }
+        println!("two plies: {correct}/{total} accepted correctly");
+        assert!(wrong.is_empty(), "wrong accepts:\n{}", wrong.join("\n"));
+        assert!(correct * 100 >= total * 85, "only {correct}/{total} two-ply lines read");
+    }
+
+    #[test]
+    fn plies_prefer_one_move_and_see_no_change() {
+        let pos = Chess::default();
+        let inf = run_line(&pos, &[find(&pos, "g1f3")], 3);
+        assert!(inf.accept, "{inf:?}");
+        assert_eq!(inf.ucis, ["g1f3"]);
+
+        let inf = run_line(&pos, &[], 4);
+        assert!(!inf.accept);
+        assert_eq!(inf.reason, Some("no change"));
+        assert!(inf.moves.is_empty());
+    }
+
+    #[test]
+    fn plies_read_a_recapture_on_the_square_just_moved_to() {
+        // 1. e4 d5 2. exd5 Qxd5: the second pair changes e4, d5 and d8 only.
+        let pos = position("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+        let line = [find(&pos, "e4d5")];
+        let mut mid = pos.clone();
+        mid.play_unchecked(line[0]);
+        let line = [line[0], find(&mid, "d8d5")];
+        let inf = run_line(&pos, &line, 11);
+        assert!(inf.accept, "{inf:?}");
+        assert_eq!(inf.ucis, ["e4d5", "d8d5"]);
+    }
+
+    #[test]
+    fn plies_hand_never_causes_wrong_accept() {
+        let corners = default_params(W, H).corners;
+        let to_img = board_to_image(&corners, 8).unwrap();
+        for (i, (pos, mv)) in e2e_cases().into_iter().enumerate().step_by(4) {
+            let mut after = pos.clone();
+            after.play_unchecked(mv);
+            let (row, col) = square_to_grid(((i * 11) % 64) as u8);
+            let (x, y) = to_img.apply(col as f64 + 0.5, row as f64 + 0.5);
+            let r = 30.0;
+            let d = diff_between(pos.board(), after.board(), 7000 + i as u64, Some((x as f32, y as f32, r as f32)));
+            let inf = infer_plies(&pos, &d, 2, &InferConfig::default());
+            if !inf.accept {
+                continue;
+            }
+            assert_eq!(inf.ucis[0], uci(mv), "wrong first ply with a hand");
+            // A hand resting exactly over both squares of a legal reply is
+            // indistinguishable from that reply. That is the only allowed extra ply.
+            if let Some(extra) = inf.moves.get(1) {
+                let mut mid = pos.clone();
+                mid.play_unchecked(mv);
+                for s in changed_squares(&mid, extra) {
+                    let (row, col) = square_to_grid(s);
+                    let (sx, sy) = to_img.apply(col as f64 + 0.5, row as f64 + 0.5);
+                    let dist = ((sx - x).powi(2) + (sy - y).powi(2)).sqrt();
+                    assert!(dist < r + 30.0, "extra ply {:?} not under the hand (square {s}, {dist:.0} px)", inf.ucis);
+                }
+            }
+        }
+    }
+
     #[test]
     fn timing_release() {
         let pos = Chess::default();
@@ -464,5 +704,15 @@ mod tests {
         }
         let infer_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
         println!("square_stats (2 boards, 256x256): {stats_ms:.4} ms each; infer_move: {infer_ms:.4} ms");
+
+        // Two plies (e2e4 e7e5) checked against every legal pair.
+        let mut two = after.clone();
+        two.play_unchecked(find(&after, "e7e5"));
+        let d2 = diff_between(pos.board(), two.board(), 3, None);
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            std::hint::black_box(infer_plies(&pos, &d2, 2, &InferConfig::default()));
+        }
+        println!("infer_plies (2 plies): {:.3} ms", t.elapsed().as_secs_f64() * 1e3 / 20.0);
     }
 }

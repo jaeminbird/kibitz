@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use cg_core::{Corners, Frame};
 use cg_vision::{
-    infer_move, square_diff, square_stats, warp_board, CornerTracker, GateConfig, GateState, InferConfig, Inference,
-    SquareStats, StabilityGate, TrackerConfig,
+    infer_move, infer_plies, square_diff, square_stats, warp_board, CornerTracker, GateConfig, GateState, InferConfig,
+    Inference, PlyInference, SquareStats, StabilityGate, TrackerConfig,
 };
 use shakmaty::Chess;
 
@@ -30,6 +30,10 @@ pub enum Outcome {
     Stable,
     /// First settled frame after movement: here is what changed.
     Read { inference: Inference, stats: Box<SquareStats> },
+    /// A read was missed since the reference (see `note_missed`), the plain
+    /// one-move read failed on this settled frame, and `infer_plies` accepted
+    /// a line (usually two plies): `plies` are the moves to commit, in order.
+    Resync { plies: PlyInference, stats: Box<SquareStats> },
 }
 
 pub struct VisionPipeline {
@@ -40,6 +44,9 @@ pub struct VisionPipeline {
     /// Frame size `corners` are expressed in.
     dims: (u32, u32),
     reference: Option<SquareStats>,
+    /// Since when a settled read may have gone uncommitted (ambiguous, no LLM
+    /// answer), so the board may be a ply ahead of the reference.
+    missed_since: Option<Instant>,
     failing_since: Option<Instant>,
     pub last_frame_ms: f32,
 }
@@ -53,6 +60,7 @@ impl VisionPipeline {
             corners: None,
             dims: (0, 0),
             reference: None,
+            missed_since: None,
             failing_since: None,
             last_frame_ms: 0.0,
         }
@@ -93,11 +101,24 @@ impl VisionPipeline {
     /// move, new game): re-baseline on the next settled frame.
     pub fn rebaseline(&mut self) {
         self.reference = None;
+        self.missed_since = None;
     }
 
     /// Accept `stats` (from a Read) as the new reference after a commit.
     pub fn commit_reference(&mut self, stats: Box<SquareStats>) {
         self.reference = Some(*stats);
+        self.missed_since = None;
+    }
+
+    /// A settled read at `at` was not committed (ambiguous): keep the reference
+    /// and check later reads over two plies against it.
+    pub fn note_missed(&mut self, at: Instant) {
+        self.missed_since.get_or_insert(at);
+    }
+
+    /// When the oldest uncommitted read happened, if one is still pending.
+    pub fn missed_since(&self) -> Option<Instant> {
+        self.missed_since
     }
 
     pub fn process(&mut self, frame: &Frame, pos: &Chess) -> Outcome {
@@ -150,6 +171,17 @@ impl VisionPipeline {
                 let stats = square_stats(&board);
                 let diff = square_diff(reference, &stats);
                 let inference = infer_move(pos, &diff, &self.infer_cfg);
+                if self.missed_since.is_some() && !inference.accept {
+                    if inference.reason == Some("no change") {
+                        // The board is back to the reference: nothing was missed.
+                        self.missed_since = None;
+                    } else {
+                        let plies = infer_plies(pos, &diff, 2, &self.infer_cfg);
+                        if plies.accept {
+                            return Outcome::Resync { plies, stats: Box::new(stats) };
+                        }
+                    }
+                }
                 Outcome::Read { inference, stats: Box::new(stats) }
             }
         }
@@ -159,8 +191,10 @@ impl VisionPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game;
+    use crate::testkit::Rig;
     use cg_vision::synth;
-    use shakmaty::Position;
+    use shakmaty::{Position, Square};
 
     const W: u32 = 640;
     const H: u32 = 480;
@@ -250,5 +284,87 @@ mod tests {
         assert!(vision.tracker.corners().is_none());
         let (back, _) = board_frame(100, t0 + DT * (k + 1));
         assert!(matches!(vision.process(&back, &pos), Outcome::NoBoard));
+    }
+
+    fn play(pos: &Chess, ucis: &[&str]) -> Chess {
+        let mut p = pos.clone();
+        for u in ucis {
+            let mv = game::parse_move(&p, u).expect("legal");
+            p.play_unchecked(mv);
+        }
+        p
+    }
+
+    /// e2e4 is read while the pawn is still in the hand (only e2 changed:
+    /// ambiguous), then e4 lands and Black answers e7e5 before the next read.
+    fn missed_then_two_plies(rig: &mut Rig, pos: &Chess, note_missed: bool) -> Outcome {
+        let mut lifted = pos.board().clone();
+        lifted.discard_piece_at(Square::E2);
+        match rig.settle(Some(&lifted), None, pos) {
+            Some(Outcome::Read { inference, .. }) => {
+                assert_eq!(inference.reason, Some("ambiguous"), "{inference:?}");
+                if note_missed {
+                    rig.vision.note_missed(Instant::now());
+                }
+            }
+            _ => panic!("expected an ambiguous read"),
+        }
+        let after = play(pos, &["e2e4", "e7e5"]);
+        rig.settle(Some(after.board()), None, pos).expect("settled")
+    }
+
+    #[test]
+    fn missed_read_without_two_ply_freezes() {
+        let pos = Chess::default();
+        let mut rig = Rig::new(pos.board());
+        assert!(matches!(rig.settle(Some(pos.board()), None, &pos), Some(Outcome::Baseline)));
+        match missed_then_two_plies(&mut rig, &pos, false) {
+            Outcome::Read { inference, .. } => assert!(!inference.accept, "one move cannot explain two"),
+            _ => panic!("expected a plain read"),
+        }
+    }
+
+    #[test]
+    fn missed_read_is_resolved_over_two_plies() {
+        let pos = Chess::default();
+        let mut rig = Rig::new(pos.board());
+        assert!(matches!(rig.settle(Some(pos.board()), None, &pos), Some(Outcome::Baseline)));
+        match missed_then_two_plies(&mut rig, &pos, true) {
+            Outcome::Resync { plies, stats } => {
+                assert!(plies.accept);
+                assert_eq!(plies.ucis, ["e2e4", "e7e5"]);
+                rig.vision.commit_reference(stats);
+            }
+            _ => panic!("expected a two-ply resync"),
+        }
+        assert!(rig.vision.missed_since().is_none());
+        // Reading continues from the new reference.
+        let pos = play(&pos, &["e2e4", "e7e5"]);
+        let after = play(&pos, &["g1f3"]);
+        match rig.settle(Some(after.board()), None, &pos) {
+            Some(Outcome::Read { inference, .. }) => {
+                assert!(inference.accept);
+                assert_eq!(inference.best_uci.as_deref(), Some("g1f3"));
+            }
+            _ => panic!("expected a read"),
+        }
+    }
+
+    #[test]
+    fn missed_read_clears_when_the_board_returns_to_the_reference() {
+        let pos = Chess::default();
+        let mut rig = Rig::new(pos.board());
+        assert!(matches!(rig.settle(Some(pos.board()), None, &pos), Some(Outcome::Baseline)));
+        rig.vision.note_missed(Instant::now());
+        match rig.settle(Some(pos.board()), Some((Square::D5, 45.0)), &pos) {
+            Some(Outcome::Read { inference, .. }) => assert!(!inference.accept),
+            _ => panic!("expected a read"),
+        }
+        assert!(rig.vision.missed_since().is_some());
+        match rig.settle(Some(pos.board()), None, &pos) {
+            Some(Outcome::Read { inference, .. }) => assert_eq!(inference.reason, Some("no change")),
+            _ => panic!("expected a read"),
+        }
+        assert!(rig.vision.missed_since().is_none());
     }
 }

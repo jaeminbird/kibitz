@@ -30,6 +30,8 @@ Per new frame (watch changed):
    - accept → commit (side = whoever is to move), reference = current stats, then go to "after commit".
    - "no change" → nothing.
    - "ambiguous" with LLM → `pick_move` among the top ranked candidates (SAN). Answer in the list → commit with source "llm".
+   - "ambiguous" in any case → `vision.note_missed`: the reference is kept, and the board may be a ply ahead of it. While a read is missed, a later fresh read that one move doesn't explain is also tried with `infer_plies` (1 then 2 plies) against the same reference. If two plies are accepted the pipeline returns `Resync`, and both moves are committed in order (source "vision"). A "no change" read clears the miss (the board is back to the reference). Commit, undo, manual move and new game clear it too.
+   - Last resort: a miss still unresolved after 4 s (and no LLM pick in flight) → Info event and "Didn't catch that move" spoken once, so the user enters the move.
    - "unexplained change" on 3 consecutive fresh-stable reads → `LostTrack("board doesn't match")`. Any other settled read (accepted, "no change", "ambiguous") ends the run, so sporadic misreads spread over a game never add up.
 7. After commit: game over → announce and stop. If it's now my turn → request a suggestion (the engine handles ponder hits). If it's now the opponent's turn and the last suggestion had a ponder move → `engine.ponder(position + ponder move)`.
 

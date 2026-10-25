@@ -69,6 +69,22 @@ Algorithm:
 4. best = max group. margin = best − second-best group (or `best.score` if only one group). residual = Σ max(0, e_s) for s ∉ C(best).
 5. Use the UCI string in standard notation (`e1g1` for castling): `mv.to_uci(CastlingMode::Standard).to_string()`.
 
+Multi-ply variant, for a diff that may span more than one move (a missed read, or moves made while the board was out of view):
+```rust
+pub struct PlyInference {
+    pub moves: Vec<shakmaty::Move>, pub ucis: Vec<String>,   // best line, in play order
+    pub score: f32, pub margin: f32, pub residual: f32, pub changed: u32,
+    pub accept: bool, pub reason: Option<&'static str>,      // same reasons as Inference
+}
+pub fn infer_plies(pos: &Chess, diff: &[f32; 64], max_plies: usize, cfg: &InferConfig) -> PlyInference;
+```
+- Same threshold and excess as `infer_move`. `changed == 0` → "no change" (zero plies).
+- Tries lines of exactly 1 ply, then exactly 2, …, up to `max_plies`, and returns the first accepted one (fewer plies win). Otherwise it returns the result for `max_plies`.
+- A line's changed squares are the squares whose occupant differs between `pos` and the position after the line. A recapture on the square just moved to counts that square once. Lines with the same set are one group, and a group with more than one member (promotions) is never accepted.
+- `margin` is measured against the best group whose set is not a superset of the best's. A strict superset (the best line plus one more square) must trail by at least `min_margin / 2`.
+- A line of 2 or more plies is rejected if any of its squares clearly did not change (diff < threshold / 2). Otherwise a resting hand reads as an extra opponent move.
+- Cost: about 0.12 ms for 2 plies from the start position (release).
+
 ### synth.rs — synthetic renderer (used by tests and the `bench` command)
 ```rust
 pub struct SynthParams {
