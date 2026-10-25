@@ -187,6 +187,33 @@ async fn control_gate_and_validation() {
 }
 
 #[tokio::test]
+async fn set_corners_rejects_degenerate_quads() {
+    let mut h = start(18140..=18150).await;
+    let client = reqwest::Client::new();
+    let set = |view: &str| format!(r#"{{"action":"set_corners","view":{view}}}"#);
+
+    // In range but collinear, all on one point, or a sliver under 1% of the frame.
+    for view in [
+        "[[0,0],[0.5,0],[1,0],[0.5,0]]",
+        "[[0.5,0.5],[0.5,0.5],[0.5,0.5],[0.5,0.5]]",
+        "[[0.1,0.1],[0.9,0.1],[0.9,0.11],[0.1,0.11]]",
+    ] {
+        let r = post_control(&client, &h, "application/json", None, &set(view)).await;
+        assert_eq!(r.status(), 400, "{view}");
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["error"], "degenerate board quadrilateral", "{view}");
+    }
+
+    // A real board, in either winding, is accepted.
+    for view in ["[[0.1,0.1],[0.9,0.1],[0.9,0.9],[0.1,0.9]]", "[[0.1,0.1],[0.1,0.9],[0.9,0.9],[0.9,0.1]]"] {
+        let r = post_control(&client, &h, "application/json", None, &set(view)).await;
+        assert_eq!(r.status(), 202, "{view}");
+        assert!(matches!(h.controls.recv().await.unwrap(), Control::SetCorners { .. }));
+    }
+    assert!(h.controls.try_recv().is_err(), "a rejected quad must not be queued");
+}
+
+#[tokio::test]
 async fn events_snapshot_history_then_live() {
     let h = start(18080..=18090).await;
     h.bus.emit(EventKind::Info { message: "old".into() });

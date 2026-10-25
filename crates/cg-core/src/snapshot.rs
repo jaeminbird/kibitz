@@ -62,6 +62,38 @@ impl Corners {
     }
 }
 
+/// Why [`validate_corners`] rejected a quadrilateral.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuadError {
+    /// A coordinate is not finite or lies outside `[-margin, 1 + margin]`.
+    OutOfRange,
+    /// The quadrilateral covers 1% of the frame or less.
+    Degenerate,
+}
+
+/// Checks four corners given as fractions of frame width and height: every
+/// coordinate is finite and within `[-margin, 1 + margin]`, and the
+/// quadrilateral spans more than 1% of the frame (shoelace area).
+pub fn validate_corners(quad: &[[f64; 2]; 4], margin: f64) -> Result<(), QuadError> {
+    if !quad
+        .iter()
+        .flatten()
+        .all(|v| (-margin..=1.0 + margin).contains(v))
+    {
+        return Err(QuadError::OutOfRange);
+    }
+    let twice_area: f64 = (0..4)
+        .map(|i| {
+            let (p, q) = (quad[i], quad[(i + 1) % 4]);
+            p[0] * q[1] - q[0] * p[1]
+        })
+        .sum();
+    if twice_area.abs() / 2.0 <= 0.01 {
+        return Err(QuadError::Degenerate);
+    }
+    Ok(())
+}
+
 /// Engine evaluation from the asking player's point of view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -180,6 +212,22 @@ mod tests {
         }
         // Black's screen bottom-right is a8.
         assert_eq!(Corners::from_view(v, false).0[0], [1.0, 1.0]);
+    }
+
+    #[test]
+    fn corners_validation() {
+        let square = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]];
+        assert_eq!(validate_corners(&square, 0.05), Ok(()));
+        let collinear = [[0.0, 0.0], [0.5, 0.0], [1.0, 0.0], [0.5, 0.0]];
+        assert_eq!(
+            validate_corners(&collinear, 0.05),
+            Err(QuadError::Degenerate)
+        );
+        let outside = [[0.1, 0.1], [1.08, 0.1], [0.9, 0.9], [0.1, 0.9]];
+        assert_eq!(validate_corners(&outside, 0.05), Err(QuadError::OutOfRange));
+        assert_eq!(validate_corners(&outside, 0.1), Ok(()));
+        let nan = [[f64::NAN, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]];
+        assert_eq!(validate_corners(&nan, 0.1), Err(QuadError::OutOfRange));
     }
 
     #[test]

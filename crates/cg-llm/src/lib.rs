@@ -365,21 +365,17 @@ fn parse_openai(reply: &Value) -> Result<(String, u64, u64), LlmError> {
 
 /// Checks 4 corners lie near the image and span a non-degenerate quadrilateral (area > 1%).
 fn validate_corners(pts: &[[f64; 2]]) -> Result<Corners, LlmError> {
-    let [a, b, c, d] = <[[f64; 2]; 4]>::try_from(pts)
+    let quad = <[[f64; 2]; 4]>::try_from(pts)
         .map_err(|_| LlmError::BadAnswer(format!("expected 4 corners, got {}", pts.len())))?;
-    if pts.iter().flatten().any(|v| !(-0.05..=1.05).contains(v)) {
-        return Err(LlmError::BadAnswer("corner outside the image".into()));
-    }
-    let quad = [a, b, c, d];
-    let twice_area: f64 = (0..4)
-        .map(|i| {
-            let (p, q) = (quad[i], quad[(i + 1) % 4]);
-            p[0] * q[1] - q[0] * p[1]
-        })
-        .sum();
-    if twice_area.abs() / 2.0 <= 0.01 {
-        return Err(LlmError::BadAnswer("degenerate board quadrilateral".into()));
-    }
+    cg_core::validate_corners(&quad, 0.05).map_err(|e| {
+        LlmError::BadAnswer(
+            match e {
+                cg_core::QuadError::OutOfRange => "corner outside the image",
+                cg_core::QuadError::Degenerate => "degenerate board quadrilateral",
+            }
+            .into(),
+        )
+    })?;
     Ok(quad.map(|p| [p[0] as f32, p[1] as f32]))
 }
 

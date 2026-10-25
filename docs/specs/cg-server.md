@@ -34,7 +34,7 @@ A middleware layer on the whole router answers **403** `forbidden` unless the `H
 - Content-Type must be `application/json` (parameters allowed). Otherwise **403** `forbidden`.
 - If an `Origin` header is present, it must equal `http://127.0.0.1:<port>` or `http://localhost:<port>`. Otherwise **403** `forbidden`. (No Origin, e.g. curl, is allowed. This plus the JSON content type blocks cross-site form posts and simple requests.)
 - Parse into `cg_core::Control`. Unknown action / missing field → **400** `{"error": "..."}`.
-- Validate against the current snapshot (`bus.snapshot()`): `Move{mv}` must be legal (SAN or UCI) in `snapshot.fen` (shakmaty) → else 400 "illegal move". `NewGame{color,fen}`: color is "white"|"black", and fen (if given) parses to a legal position → else 400. `SetCorners`: all coords finite and within [-0.1, 1.1].
+- Validate against the current snapshot (`bus.snapshot()`): `Move{mv}` must be legal (SAN or UCI) in `snapshot.fen` (shakmaty) → else 400 "illegal move". `NewGame{color,fen}`: color is "white"|"black", and fen (if given) parses to a legal position → else 400. `SetCorners`: `cg_core::validate_corners` with margin 0.1, the same check the LLM path uses (margin 0.05 there): all coords finite and within [-0.1, 1.1], else 400 "corners must be finite and within [-0.1, 1.1]"; and the quad spans more than 1% of the frame, else 400 "degenerate board quadrilateral".
 - Then `controls.try_send(control)`. Full → 503. OK → **202** `{"ok":true}`.
 
 ## index.html (single file, no external requests, no build step, vanilla JS)

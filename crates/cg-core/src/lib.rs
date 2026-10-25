@@ -13,7 +13,9 @@ pub use bus::{Bus, BusMsg, Subscription};
 pub use control::{Control, Side};
 pub use event::{EventKind, GameEvent};
 pub use frame::{CaptureError, Frame, FrameSource};
-pub use snapshot::{Corners, Latency, Score, Snapshot, Status, Suggestion};
+pub use snapshot::{
+    validate_corners, Corners, Latency, QuadError, Score, Snapshot, Status, Suggestion,
+};
 pub use speech::spoken_san;
 
 /// Milliseconds since the Unix epoch.

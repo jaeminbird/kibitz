@@ -5,7 +5,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use cg_core::{Control, Snapshot};
+use cg_core::{Control, QuadError, Snapshot};
 use shakmaty::fen::Fen;
 use shakmaty::san::SanPlus;
 use shakmaty::uci::UciMove;
@@ -75,12 +75,14 @@ pub(crate) fn validate(ctl: &Control, snap: &Snapshot) -> Result<(), String> {
             Ok(())
         }
         Control::SetCorners { view } => {
-            let ok = view.iter().flatten().all(|c| c.is_finite() && (-0.1..=1.1).contains(c));
-            if ok {
-                Ok(())
-            } else {
-                Err("corners must be finite and within [-0.1, 1.1]".into())
-            }
+            let quad = view.map(|p| p.map(f64::from));
+            cg_core::validate_corners(&quad, 0.1).map_err(|e| {
+                match e {
+                    QuadError::OutOfRange => "corners must be finite and within [-0.1, 1.1]",
+                    QuadError::Degenerate => "degenerate board quadrilateral",
+                }
+                .into()
+            })
         }
         Control::Pause | Control::Resume | Control::Undo | Control::Repeat | Control::Relocate => {
             Ok(())
