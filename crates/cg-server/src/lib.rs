@@ -3,6 +3,8 @@
 //! Binds 127.0.0.1 only. Routes: the single-page UI (`/`, `/overlay`), an SSE
 //! stream of snapshots and game events (`/events`), JPEG and MJPEG frames
 //! (`/frame.jpg`, `/frame.mjpg`) and a gated JSON control endpoint (`/control`).
+//! Every route rejects a `Host` other than this server's own address, so a
+//! DNS-rebinding page cannot read frames or events.
 
 mod control;
 mod frames;
@@ -16,8 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -101,7 +104,31 @@ fn router(state: AppState) -> Router {
         .route("/frame.jpg", get(frame_jpg))
         .route("/frame.mjpg", get(frame_mjpg))
         .route("/control", post(control::post))
+        .layer(middleware::from_fn_with_state(state.clone(), host_gate))
         .with_state(state)
+}
+
+/// 403 unless `Host` is `127.0.0.1:<port>` or `localhost:<port>`. A
+/// DNS-rebinding page reaches this socket with its own hostname in `Host`.
+async fn host_gate(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    let ok = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|h| host_ok(h, st.port))
+        && req.uri().authority().is_none_or(|a| host_ok(a.as_str(), st.port));
+    if ok {
+        next.run(req).await
+    } else {
+        (StatusCode::FORBIDDEN, "forbidden").into_response()
+    }
+}
+
+fn host_ok(host: &str, port: u16) -> bool {
+    host.rsplit_once(':').is_some_and(|(name, p)| {
+        p == port.to_string()
+            && (name == "127.0.0.1" || name.eq_ignore_ascii_case("localhost"))
+    })
 }
 
 async fn index() -> Response {

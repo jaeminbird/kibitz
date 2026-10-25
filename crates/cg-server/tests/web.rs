@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use cg_core::{Bus, Control, EventKind, Frame};
 use cg_server::{serve, ServerConfig, ServerHandle};
-use reqwest::header::{CONTENT_TYPE, ORIGIN};
-use tokio::net::TcpListener;
+use reqwest::header::{CONTENT_TYPE, HOST, ORIGIN};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 
 struct Harness {
@@ -202,6 +203,64 @@ async fn events_snapshot_history_then_live() {
     let got = read_sse(&mut resp, 1).await;
     assert_eq!(got[0].0, "game");
     assert_eq!(got[0].1["kind"], "resumed");
+}
+
+#[tokio::test]
+async fn host_gate_blocks_dns_rebinding() {
+    let mut h = start(18120..=18130).await;
+    h.frames.send(Some(gray_frame(1))).unwrap();
+    let client = reqwest::Client::new();
+    let routes = ["/", "/overlay", "/frame.jpg", "/frame.mjpg", "/events"];
+    let get = |path: &str, host: &str| {
+        client.get(format!("{}{path}", h.base)).header(HOST, host).send()
+    };
+
+    // Our own address under either name passes (streams are only checked for status).
+    for host in [format!("127.0.0.1:{}", h.port), format!("localhost:{}", h.port)] {
+        for path in routes {
+            let r = get(path, &host).await.unwrap();
+            assert_eq!(r.status(), 200, "{path} with Host {host}");
+        }
+    }
+
+    // A rebound hostname, a wrong port, or a bare name is refused on every route.
+    let bad = [
+        format!("evil.example:{}", h.port),
+        "evil.example".to_string(),
+        format!("127.0.0.1:{}", h.port + 1),
+        "localhost".to_string(),
+    ];
+    for host in &bad {
+        for path in routes {
+            let r = get(path, host).await.unwrap();
+            assert_eq!(r.status(), 403, "{path} with Host {host}");
+        }
+        let r = client
+            .post(format!("{}/control", h.base))
+            .header(HOST, host.as_str())
+            .header(CONTENT_TYPE, "application/json")
+            .body(r#"{"action":"pause"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "POST /control with Host {host}");
+    }
+    assert!(h.controls.try_recv().is_err(), "a refused control must not be queued");
+
+    // No Host header at all is refused too.
+    for req in [
+        "GET /frame.jpg HTTP/1.0\r\n\r\n",
+        "GET /events HTTP/1.1\r\nConnection: close\r\n\r\n",
+    ] {
+        let mut sock = TcpStream::connect(h._handle.addr).await.unwrap();
+        sock.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = String::new();
+        tokio::time::timeout(Duration::from_secs(5), sock.read_to_string(&mut resp))
+            .await
+            .expect("timed out reading response")
+            .unwrap();
+        assert!(resp.get(9..12) == Some("403"), "{req:?} got {resp:?}");
+    }
 }
 
 #[tokio::test]

@@ -27,6 +27,9 @@ pub async fn serve(
 | `GET /frame.mjpg` | `multipart/x-mixed-replace; boundary=frame` stream. Pushes the (cached) JPEG each time `frames` changes, capped at 15 fps. Encoding happens only while someone is connected. |
 | `POST /control` | See below. |
 
+## Host gate (every route)
+A middleware layer on the whole router answers **403** `forbidden` unless the `Host` header is exactly `127.0.0.1:<port>` or `localhost:<port>` (the bound port; `localhost` is case-insensitive). A missing `Host`, a bare name with no port, or a different port is refused. If the request URI carries an authority (absolute form), it must pass the same check. This blocks DNS-rebinding pages, which reach the loopback socket with their own hostname in `Host`, from reading `/frame.jpg`, `/frame.mjpg` or `/events`. It runs before the control gate below.
+
 ## Control gate
 - Content-Type must be `application/json` (parameters allowed). Otherwise **403** `forbidden`.
 - If an `Origin` header is present, it must equal `http://127.0.0.1:<port>` or `http://localhost:<port>`. Otherwise **403** `forbidden`. (No Origin, e.g. curl, is allowed. This plus the JSON content type blocks cross-site form posts and simple requests.)
@@ -52,6 +55,7 @@ Full-viewport `/frame.mjpg` plus the same canvas drawing (grid, suggestion arrow
 ## Tests (`tests/web.rs`, real server on an ephemeral port range, e.g. 18000..=18050)
 - `/` serves HTML containing "kibitz".
 - `/frame.jpg` is 404 before a frame. After sending `Frame::from_gray(1, 64, 48, …)` into the watch, it is 200 with JPEG magic bytes `FF D8`.
+- Host gate: `127.0.0.1:<port>` and `localhost:<port>` pass on every GET route; a foreign host, a wrong port or a bare name gets 403 on every GET route and on `POST /control` (nothing is queued); a request with no `Host` gets 403.
 - `/control`: wrong content type → 403; a foreign Origin → 403; same-origin JSON pause → 202 and the control arrives on the mpsc; illegal move → 400; unknown action → 400.
 - `/events`: the first event is `snapshot`, then recent events in order, then a newly emitted event arrives.
 - The port fallback works when the first port is taken.
