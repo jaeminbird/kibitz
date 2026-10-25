@@ -54,6 +54,7 @@ The remaining fixed cost is the stability window: you can't read a move while a 
 - **Gate: local-change criterion.** A piece appearing between two frames barely moves the *mean* motion. The gate now also treats any single thumbnail cell changing by more than 20 gray levels as motion. This took the bench from 24 to 39 of 40 moves read.
 - **Tracker.** Each corner is predicted from its own recent motion, and the templates are sampled rotated by the board's roll since calibration. Templates are still never re-cut, so there is no drift. Error stays at or below 1.7 px through a 10° roll.
 - **Capture on Windows** uses Windows Graphics Capture (xcap `wgc`). It is about 3× faster than GDI and captures GPU-composited call video, which GDI often returns black for.
+- **Missed reads and look-aways.** The reference is the board at the last commit, and it is kept across an uncommitted (ambiguous) read, a lost board, a re-location and a pause. The next settled frame is checked against it over up to two plies (`infer_plies`), so a move nobody resolved, or one made while the board was out of view, is still read. If nothing explains the change, the app says "Didn't catch that move" once.
 - **Stockfish 19** has no `Ponder` UCI option. `go ponder` and `ponderhit` work without it.
 
 ## Process layout

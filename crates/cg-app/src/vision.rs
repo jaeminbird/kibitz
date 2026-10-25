@@ -34,6 +34,11 @@ pub enum Outcome {
     /// one-move read failed on this settled frame, and `infer_plies` accepted
     /// a line (usually two plies): `plies` are the moves to commit, in order.
     Resync { plies: PlyInference, stats: Box<SquareStats> },
+    /// First settled frame after the board was out of view, re-located or
+    /// paused, checked over 0, 1 or 2 plies against the last game-consistent
+    /// reference. The caller commits `plies.moves` if accepted, and adopts
+    /// `stats` as the new reference either way.
+    Reacquired { plies: PlyInference, stats: Box<SquareStats> },
 }
 
 pub struct VisionPipeline {
@@ -47,6 +52,9 @@ pub struct VisionPipeline {
     /// Since when a settled read may have gone uncommitted (ambiguous, no LLM
     /// answer), so the board may be a ply ahead of the reference.
     missed_since: Option<Instant>,
+    /// The reference was kept across a gap (look-away, relocation, pause):
+    /// check the next settled frame against it before reading on.
+    verify: bool,
     failing_since: Option<Instant>,
     pub last_frame_ms: f32,
 }
@@ -61,6 +69,7 @@ impl VisionPipeline {
             dims: (0, 0),
             reference: None,
             missed_since: None,
+            verify: false,
             failing_since: None,
             last_frame_ms: 0.0,
         }
@@ -84,7 +93,9 @@ impl VisionPipeline {
         self.gate.reset();
         self.corners = Some(corners);
         self.dims = (frame.width, frame.height);
-        self.reference = None;
+        // Keep the last game-consistent reference: moves made while the board
+        // was not tracked are read from it on the next settled frame.
+        self.recheck();
         self.failing_since = None;
     }
 
@@ -93,8 +104,14 @@ impl VisionPipeline {
     pub fn forget_board(&mut self) {
         self.tracker.clear();
         self.corners = None;
-        self.reference = None;
+        self.recheck();
         self.failing_since = None;
+    }
+
+    /// The board may have changed unseen (look-away, pause): check the next
+    /// settled frame against the reference over up to two plies.
+    pub fn recheck(&mut self) {
+        self.verify = self.reference.is_some();
     }
 
     /// The physical board may not match the reference any more (undo, manual
@@ -102,12 +119,14 @@ impl VisionPipeline {
     pub fn rebaseline(&mut self) {
         self.reference = None;
         self.missed_since = None;
+        self.verify = false;
     }
 
     /// Accept `stats` (from a Read) as the new reference after a commit.
     pub fn commit_reference(&mut self, stats: Box<SquareStats>) {
         self.reference = Some(*stats);
         self.missed_since = None;
+        self.verify = false;
     }
 
     /// A settled read at `at` was not committed (ambiguous): keep the reference
@@ -165,6 +184,13 @@ impl VisionPipeline {
                     self.reference = Some(square_stats(&board));
                     return Outcome::Baseline;
                 };
+                if self.verify {
+                    // Any settled frame will do: after a pause nothing may have moved.
+                    self.verify = false;
+                    let stats = square_stats(&board);
+                    let plies = infer_plies(pos, &square_diff(reference, &stats), 2, &self.infer_cfg);
+                    return Outcome::Reacquired { plies, stats: Box::new(stats) };
+                }
                 if !fresh {
                     return Outcome::Stable;
                 }
@@ -366,5 +392,66 @@ mod tests {
             _ => panic!("expected a read"),
         }
         assert!(rig.vision.missed_since().is_none());
+    }
+
+    /// Look away for 2 s (the board is lost), let `during` be played, then
+    /// re-locate the board and return the first settled outcome.
+    fn look_away(rig: &mut Rig, pos: &Chess, during: &[&str]) -> Outcome {
+        let outs = rig.hold(None, None, 30, pos);
+        assert!(outs.iter().any(|o| matches!(o, Outcome::Lost)), "board never lost");
+        let after = play(pos, during);
+        rig.relocate(after.board());
+        rig.settle(Some(after.board()), None, pos).expect("settled")
+    }
+
+    fn reacquired(out: Outcome) -> (PlyInference, Box<SquareStats>) {
+        match out {
+            Outcome::Reacquired { plies, stats } => (plies, stats),
+            Outcome::Baseline => panic!("took an unchecked baseline"),
+            _ => panic!("expected a re-acquire check"),
+        }
+    }
+
+    #[test]
+    fn move_made_during_look_away_is_read_on_reacquire() {
+        let pos = Chess::default();
+        let mut rig = Rig::new(pos.board());
+        assert!(matches!(rig.settle(Some(pos.board()), None, &pos), Some(Outcome::Baseline)));
+        let (plies, stats) = reacquired(look_away(&mut rig, &pos, &["e2e4"]));
+        assert!(plies.accept, "{plies:?}");
+        assert_eq!(plies.ucis, ["e2e4"]);
+        rig.vision.commit_reference(stats);
+
+        // Two plies while away, and then a look-away with nothing played.
+        let pos = play(&pos, &["e2e4"]);
+        let (plies, stats) = reacquired(look_away(&mut rig, &pos, &["e7e5", "g1f3"]));
+        assert!(plies.accept, "{plies:?}");
+        assert_eq!(plies.ucis, ["e7e5", "g1f3"]);
+        rig.vision.commit_reference(stats);
+
+        let pos = play(&pos, &["e7e5", "g1f3"]);
+        let (plies, _) = reacquired(look_away(&mut rig, &pos, &[]));
+        assert_eq!(plies.reason, Some("no change"));
+    }
+
+    #[test]
+    fn move_made_during_pause_is_read_on_resume() {
+        let pos = Chess::default();
+        let mut rig = Rig::new(pos.board());
+        assert!(matches!(rig.settle(Some(pos.board()), None, &pos), Some(Outcome::Baseline)));
+        // Paused: no frames reach the pipeline. Resume rechecks.
+        let after = play(&pos, &["d2d4"]);
+        rig.vision.recheck();
+        let (plies, _) = reacquired(rig.settle(Some(after.board()), None, &pos).expect("settled"));
+        assert!(plies.accept, "{plies:?}");
+        assert_eq!(plies.ucis, ["d2d4"]);
+    }
+
+    #[test]
+    fn first_calibration_still_takes_a_baseline() {
+        let pos = Chess::default();
+        let mut rig = Rig::new(pos.board());
+        rig.vision.recheck(); // nothing to check against yet
+        assert!(matches!(rig.settle(Some(pos.board()), None, &pos), Some(Outcome::Baseline)));
     }
 }

@@ -181,6 +181,37 @@ impl Actor {
             }
             Outcome::Read { inference, stats } => self.on_read(&frame, inference, stats),
             Outcome::Resync { plies, stats } => self.on_resync(&frame, plies, stats),
+            Outcome::Reacquired { plies, stats } => self.on_reacquired(&frame, plies, stats),
+        }
+    }
+
+    /// First settled board after a look-away, relocation or pause, checked
+    /// against the last game-consistent reference.
+    fn on_reacquired(&mut self, frame: &Frame, plies: cg_vision::PlyInference, stats: Box<cg_vision::SquareStats>) {
+        self.bus.emit(EventKind::Frame {
+            seq: frame.seq,
+            changed_squares: plies.changed,
+            best: (!plies.ucis.is_empty()).then(|| plies.ucis.join(" ")),
+            margin: (!plies.moves.is_empty()).then_some(plies.margin),
+            skipped: plies.reason.map(String::from),
+            vision_ms: self.vision.last_frame_ms,
+        });
+        self.unexplained.reset();
+        self.lost = false;
+        self.dirty = true;
+        if plies.accept {
+            self.on_resync_moves(frame, plies, stats);
+            return;
+        }
+        // Either nothing moved, or the change can't be read: the board as it
+        // is now becomes the reference.
+        self.vision.commit_reference(stats);
+        if plies.reason != Some("no change") {
+            self.bus.emit(EventKind::Info {
+                message: "the board changed while out of view and could not be read; enter any missed move".into(),
+            });
+            self.speaker.say("Didn't catch that move");
+            self.save_frame("missed");
         }
     }
 
@@ -196,6 +227,11 @@ impl Actor {
         });
         self.unexplained.reset();
         self.lost = false;
+        self.on_resync_moves(frame, plies, stats);
+    }
+
+    /// Commit an accepted line of plies read against the reference.
+    fn on_resync_moves(&mut self, frame: &Frame, plies: cg_vision::PlyInference, stats: Box<cg_vision::SquareStats>) {
         self.vision.commit_reference(stats);
         self.settled_at = Some(frame.at);
         for mv in plies.moves {
@@ -525,7 +561,8 @@ impl Actor {
             Control::Resume => {
                 self.paused = false;
                 self.budget_spoken = false;
-                self.vision.rebaseline();
+                // Moves made during the pause are read against the kept reference.
+                self.vision.recheck();
                 self.bus.emit(EventKind::Resumed);
                 self.maybe_request_suggestion();
             }

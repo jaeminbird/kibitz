@@ -146,7 +146,7 @@ fn vision_bench(frames_budget: u32) {
             let out = vision.process(&f, &pos);
             frame_times.push(vision.last_frame_ms);
             if std::env::var("CG_BENCH_DEBUG").is_ok() {
-                let k = match &out { Outcome::NoBoard=>"noboard", Outcome::Searching=>"searching", Outcome::Lost=>"LOST", Outcome::Moving=>"moving", Outcome::Settling=>"settling", Outcome::Baseline=>"baseline", Outcome::Stable=>"stable", Outcome::Read{..}=>"READ", Outcome::Resync{..}=>"RESYNC" };
+                let k = match &out { Outcome::NoBoard=>"noboard", Outcome::Searching=>"searching", Outcome::Lost=>"LOST", Outcome::Moving=>"moving", Outcome::Settling=>"settling", Outcome::Baseline=>"baseline", Outcome::Stable=>"stable", Outcome::Read{..}=>"READ", Outcome::Resync{..}=>"RESYNC", Outcome::Reacquired{..}=>"REACQUIRED" };
                 eprint!("{k} ");
             }
             if let Outcome::Read { inference, stats } = out {

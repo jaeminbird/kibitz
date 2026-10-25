@@ -56,6 +56,12 @@ impl Rig {
         f
     }
 
+    /// Re-locate the board on a frame of `board` (as a click or LLM locate would).
+    pub fn relocate(&mut self, board: &Board) {
+        let f = self.frame(Some(board), None);
+        self.vision.set_corners(&f, self.corners);
+    }
+
     /// Show the scene for `n` frames and return every outcome.
     pub fn hold(&mut self, board: Option<&Board>, hand: Option<(Square, f32)>, n: usize, pos: &Chess) -> Vec<Outcome> {
         (0..n)

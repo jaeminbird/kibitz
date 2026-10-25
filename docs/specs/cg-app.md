@@ -23,9 +23,10 @@ State: `GameState`, `paused`, `corners: Option<Corners>`, `CornerTracker`, `Stab
 Per new frame (watch changed):
 1. If paused / game over → skip.
 2. If no corners → `LookingForBoard`. If the LLM is enabled and not busy and ≥ 5 s since the last attempt → spawn `locate_board`. Manual `SetCorners` is always accepted.
-3. Track: `tracker.track(frame)`. A None keeps the tracker's state, and it retries on later frames with a wider search. None for > 1.5 s → `LostTrack("board not visible")`, clear corners and `tracker.clear()` (falls back to step 2). If the frame size changed, the calibrated corners are first rescaled by the size ratio (the tracker rescales its own state), so a resolution change does not lose the board.
+3. Track: `tracker.track(frame)`. A None keeps the tracker's state, and it retries on later frames with a wider search. None for > 1.5 s → `LostTrack("board not visible")`, clear corners and `tracker.clear()` (falls back to step 2). The reference is **kept** (see 5a). If the frame size changed, the calibrated corners are first rescaled by the size ratio (the tracker rescales its own state), so a resolution change does not lose the board.
 4. Warp the board (sq_px 32) and push the **warped board** into the gate. The gate looks only at the board, so movement elsewhere in the room doesn't block reading.
 5. If there is no reference yet and the gate is Stable → reference = stats(warped); status = turn status; if it's my turn, request a suggestion.
+   - **5a.** If the reference was kept across a gap (board lost and re-located, `SetCorners`/LLM locate, `Relocate`, or Resume after a pause), the first Stable frame (fresh or not) is checked with `infer_plies` over 0, 1 or 2 plies against it → `Reacquired`. Accepted → commit the plies in order. "No change" → nothing moved. Anything else → the change can't be read: Info event and "Didn't catch that move" spoken. In every case the current stats become the reference.
 6. On `Stable{fresh:true}`: diff vs reference → `infer_move`. Emit a `Frame` event.
    - accept → commit (side = whoever is to move), reference = current stats, then go to "after commit".
    - "no change" → nothing.
@@ -37,7 +38,7 @@ Per new frame (watch changed):
 
 Suggestion reply (tagged with a position id; discard if stale): build `Suggestion` (SAN via shakmaty, `spoken_san`, score), `speaker.say(spoken)`, emit `Suggest`, update the latency numbers.
 
-Controls: Pause/Resume, Undo (pop the move, engine.stop, reference = None so it re-baselines on the next stable frame), Move (commit manual, reference = None), NewGame, Repeat, SetCorners (`Corners::from_view` × frame size, `tracker.reset`, `gate.reset`, reference = None), Relocate (corners = None).
+Controls: Pause/Resume (Resume rechecks the kept reference, step 5a), Undo (pop the move, engine.stop, reference = None so it re-baselines on the next stable frame), Move (commit manual, reference = None), NewGame, Repeat, SetCorners (`Corners::from_view` × frame size, `tracker.reset`, `gate.reset`, reference kept and rechecked, step 5a), Relocate (corners = None, reference kept).
 
 Budget: after every LLM call add the cost. When `spent ≥ max_cost` → pause with "Spending limit reached. Paused." (spoken once).
 
