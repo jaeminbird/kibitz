@@ -81,7 +81,7 @@ kibitz bench   [--frames N] [--dump DIR [--selfplay]]
 ```
 
 - `--source file:` replays a recorded game, which is great for tuning.
-- `--run-dir` saves `game.pgn` and key frames.
+- `--run-dir` saves `game.pgn` and key frames, each with a JSON sidecar (board corners and FEN) for the offline tools in [`tools/`](tools/).
 - `--max-cost` caps optional LLM spending; the game pauses itself at the cap.
 
 </details>

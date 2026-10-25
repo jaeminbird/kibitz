@@ -733,8 +733,19 @@ impl Actor {
     fn save_frame(&self, what: &str) {
         let (Some(dir), Some(frame)) = (&self.cfg.run_dir, self.latest_frame.clone()) else { return };
         let path = dir.join("frames").join(format!("{}-{what}.jpg", frame.ts_ms));
+        // Sidecar for offline tools (tools/): where the board is and what the game says is on it.
+        let meta = serde_json::json!({
+            "ts_ms": frame.ts_ms,
+            "what": what,
+            "width": frame.width,
+            "height": frame.height,
+            "corners": self.vision.corners(),
+            "fen": self.game.fen(),
+            "my_color": color_name(self.cfg.my_color),
+        });
         tokio::spawn(async move {
             let jpeg = encode_jpeg(&frame).await;
+            let _ = tokio::fs::write(path.with_extension("json"), meta.to_string()).await;
             let _ = tokio::fs::write(path, jpeg).await;
         });
     }
