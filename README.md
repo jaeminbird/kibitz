@@ -99,6 +99,7 @@ capture thread ──latest frame──▶ game actor ──▶ event bus ──
 - **One owner of game state.** The hot path takes no locks, never sleeps, and never queues stale frames.
 - **Safety rules carried over:** a timed-out engine is killed and never reused; controls are same-origin JSON only; the server listens on `127.0.0.1` only.
 - **Platform seams are traits.** Capture is Windows Graphics Capture, macOS or X11/Wayland via `xcap`. Speech is SAPI, `say` or `espeak-ng`. Keys live in the OS keychain.
+- **Offline tools are Python.** [`tools/`](tools/) has a vision lab (notebook plus threshold sweep over recorded `--run-dir` games) and a piece-classifier pipeline (dataset, PyTorch training, ONNX export). Its board warp and square stats are tested to match the Rust ones exactly. Nothing in Python runs during a game.
 
 The deep dive, including every design decision compared with the original and what changed during the build, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Per-crate contracts are in [`docs/specs/`](docs/specs).
 
@@ -106,13 +107,14 @@ The deep dive, including every design decision compared with the original and wh
 
 | State | Item |
 |---|---|
-| Done | Full pipeline verified end to end on synthetic games; 106 tests |
+| Done | Full pipeline verified end to end on synthetic games; 134 Rust tests, 23 Python tests |
 | Done | Windows build, capture, speech and engine |
 | Testing | Real-camera tuning: thresholds come from synthetic data, so expect to tweak `--settle-ms` |
 | Testing | macOS / Linux: written and cross-platform by design, not yet run there |
-| Planned | Persistent capture session (~1 ms/frame), recorded-game regression suite |
+| Testing | Offline vision lab and piece-classifier pipeline: run on synthetic data, waiting on real recordings |
+| Planned | Persistent capture session (~1 ms/frame), recorded-game regression suite, classifier in the live path via ONNX Runtime |
 
-Issues and PRs welcome, especially recordings of real games to tune against.
+Issues and PRs welcome, especially recordings of real games to tune against: a `--run-dir` folder from a real game is exactly what [`tools/`](tools/) needs.
 
 ## How it was built
 
