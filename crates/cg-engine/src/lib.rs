@@ -8,6 +8,7 @@ mod actor;
 mod install;
 mod uci;
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,6 +90,10 @@ pub enum EngineError {
     GameOver,
     #[error("engine timed out")]
     Timeout,
+    /// The search was cut short by [`Engine::stop`], [`Engine::new_game`] or
+    /// [`Engine::shutdown`] sent while it ran.
+    #[error("search cancelled")]
+    Cancelled,
     #[error("engine crashed: {0}")]
     Crashed(String),
     #[error("protocol error: {0}")]
@@ -120,6 +125,10 @@ pub(crate) enum Request {
 }
 
 /// Cheap handle to the engine actor. Clones share one engine process.
+///
+/// Requests are queued when a method is called, not when its future is first
+/// polled, so calls made one after another reach the engine in that order even if
+/// their futures are awaited elsewhere (for example in spawned tasks).
 #[derive(Clone)]
 pub struct Engine {
     tx: mpsc::UnboundedSender<Request>,
@@ -129,31 +138,37 @@ pub struct Engine {
 impl Engine {
     /// Spawn the process and complete the UCI handshake.
     pub async fn start(cfg: EngineConfig) -> Result<Engine, EngineError> {
-        let mut actor = actor::Actor::new(cfg);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut actor = actor::Actor::new(cfg, rx);
         actor.connect().await?;
         let name: Arc<str> = actor.name().into();
-        let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(actor::run(actor, rx));
+        tokio::spawn(actor::run(actor));
         Ok(Engine { tx, name })
     }
 
-    /// Best move for `pos`.
+    /// Best move for `pos`. The request is queued before this returns.
     ///
     /// The position is checked with shakmaty first: an illegal move gives
     /// `BadPosition`, and a finished game gives `GameOver` without touching the engine.
     /// On `Timeout` or `Crashed` the process is killed, a fresh one is started, and the
-    /// request is retried once. A second failure is returned.
-    pub async fn best_move(&self, pos: Position) -> Result<EngineReply, EngineError> {
-        check_playable(&pos)?;
-        let (reply, rx) = oneshot::channel();
-        self.send(Request::BestMove { pos, reply })?;
-        rx.await.map_err(|_| actor_gone())?
+    /// request is retried once. A second failure is returned. An [`Engine::stop`],
+    /// [`Engine::new_game`] or [`Engine::shutdown`] sent while the search runs ends it
+    /// early with `Cancelled`.
+    pub fn best_move(
+        &self,
+        pos: Position,
+    ) -> impl Future<Output = Result<EngineReply, EngineError>> + Send + 'static {
+        let queued = check_playable(&pos).and_then(|_| {
+            let (reply, rx) = oneshot::channel();
+            self.send(Request::BestMove { pos, reply }).map(|_| rx)
+        });
+        async move { queued?.await.map_err(|_| actor_gone())? }
     }
 
     /// Start pondering `pos` (normally the position after our suggested move and its
-    /// expected reply). Returns without waiting. Replaces any previous ponder.
-    /// Invalid or finished positions are ignored with a warning.
-    pub async fn ponder(&self, pos: Position) {
+    /// expected reply). Queues the request and returns without waiting. Replaces any
+    /// previous ponder. Invalid or finished positions are ignored with a warning.
+    pub fn ponder(&self, pos: Position) {
         if let Err(e) = check_playable(&pos) {
             tracing::warn!(error = %e, "not pondering");
             return;
@@ -163,19 +178,29 @@ impl Engine {
         }
     }
 
-    /// Stop any ponder search and discard its result. Used on undo or new game.
-    pub async fn stop(&self) {
+    /// Stop any ponder search and discard its result, and cancel a running
+    /// `best_move` (it returns `Cancelled`). Used on undo or new game. The request is
+    /// queued before this returns; the future resolves once it has been handled.
+    pub fn stop(&self) -> impl Future<Output = ()> + Send + 'static {
         let (ack, rx) = oneshot::channel();
-        if self.send(Request::Stop { ack }).is_ok() {
-            let _ = rx.await;
+        let queued = self.send(Request::Stop { ack }).is_ok();
+        async move {
+            if queued {
+                let _ = rx.await;
+            }
         }
     }
 
-    /// `ucinewgame` followed by `isready`, which clears the hash table.
-    pub async fn new_game(&self) {
+    /// `ucinewgame` followed by `isready`, which clears the hash table. Cancels a
+    /// running search like [`Engine::stop`]. The request is queued before this
+    /// returns; the future resolves once it has been handled.
+    pub fn new_game(&self) -> impl Future<Output = ()> + Send + 'static {
         let (ack, rx) = oneshot::channel();
-        if self.send(Request::NewGame { ack }).is_ok() {
-            let _ = rx.await;
+        let queued = self.send(Request::NewGame { ack }).is_ok();
+        async move {
+            if queued {
+                let _ = rx.await;
+            }
         }
     }
 

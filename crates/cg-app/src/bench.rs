@@ -206,7 +206,7 @@ async fn engine_bench() {
         let Some(ponder) = reply.ponder.clone() else { break };
         moves.push(reply.bestmove.clone());
         moves.push(ponder);
-        engine.ponder(cg_engine::Position { start_fen: None, moves: moves.clone() }).await;
+        engine.ponder(cg_engine::Position { start_fen: None, moves: moves.clone() });
         tokio::time::sleep(Duration::from_millis(800)).await; // opponent thinking
         let t = Instant::now();
         let Ok(r) = engine.best_move(cg_engine::Position { start_fen: None, moves: moves.clone() }).await else { break };
