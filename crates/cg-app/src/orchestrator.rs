@@ -261,6 +261,10 @@ impl Actor {
             }
         };
         self.epoch += 1;
+        if self.engine_inflight {
+            // That search is for the old position; cut it short (queued before any ponder).
+            tokio::spawn(self.engine.stop());
+        }
         if let Some(t) = settled {
             self.latency.detect_ms = Some(ms(t.elapsed()));
         }
@@ -291,8 +295,7 @@ impl Actor {
             if let (true, Some(ponder)) = (self.cfg.ponder, expected.and_then(|r| r.ponder.clone())) {
                 let mut pos = self.engine_pos();
                 pos.moves.push(ponder);
-                let engine = self.engine.clone();
-                tokio::spawn(async move { engine.ponder(pos).await });
+                self.engine.ponder(pos);
             }
         } else {
             self.maybe_request_suggestion();
@@ -309,13 +312,13 @@ impl Actor {
             return;
         }
         self.engine_inflight = true;
-        let engine = self.engine.clone();
-        let pos = self.engine_pos();
+        // Queued now, so it reaches the engine after any stop/ponder sent before it.
+        let reply = self.engine.best_move(self.engine_pos());
+        let asked_at = Instant::now();
         let epoch = self.epoch;
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let asked_at = Instant::now();
-            let result = engine.best_move(pos).await;
+            let result = reply.await;
             let _ = tx.send(Msg::Engine { epoch, result, asked_at });
         });
     }
@@ -361,7 +364,7 @@ impl Actor {
                 });
                 self.last_reply = Some(reply);
             }
-            Err(EngineError::GameOver) => {}
+            Err(EngineError::GameOver | EngineError::Cancelled) => {}
             Err(e) => {
                 self.bus.emit(EventKind::Error { source: "engine".into(), message: e.to_string() });
                 if !self.engine_error_spoken {
@@ -501,12 +504,12 @@ impl Actor {
                 if let Some(ply) = self.game.undo() {
                     self.epoch += 1;
                     self.suggestion = None;
+                    self.last_reply = None;
                     self.vision.rebaseline();
                     self.lost = false;
                     self.bus.emit(EventKind::Undo { san: ply.san });
                     self.save_pgn();
-                    let engine = self.engine.clone();
-                    tokio::spawn(async move { engine.stop().await });
+                    tokio::spawn(self.engine.stop());
                     self.maybe_request_suggestion();
                 }
             }
@@ -532,8 +535,7 @@ impl Actor {
                         self.last_reply = None;
                         self.lost = false;
                         self.vision.rebaseline();
-                        let engine = self.engine.clone();
-                        tokio::spawn(async move { engine.new_game().await });
+                        tokio::spawn(self.engine.new_game());
                         self.bus.emit(EventKind::NewGame { color: color_name(my_color).into(), fen: self.game.fen() });
                         self.save_pgn();
                         self.maybe_request_suggestion();
