@@ -65,7 +65,7 @@ struct Actor {
     source_missing: bool,
     ended: bool,
     lost: bool,
-    unexplained: u32,
+    unexplained: UnexplainedRun,
 
     suggestion: Option<Suggestion>,
     last_reply: Option<EngineReply>,
@@ -108,7 +108,7 @@ pub async fn run(
         source_missing: false,
         ended: false,
         lost: false,
-        unexplained: 0,
+        unexplained: UnexplainedRun::default(),
         suggestion: None,
         last_reply: None,
         engine_inflight: false,
@@ -170,7 +170,7 @@ impl Actor {
             Outcome::Searching | Outcome::Moving | Outcome::Settling | Outcome::Stable => {}
             Outcome::Baseline => {
                 self.lost = false;
-                self.unexplained = 0;
+                self.unexplained.reset();
                 self.dirty = true;
             }
             Outcome::Read { inference, stats } => self.on_read(&frame, inference, stats),
@@ -187,9 +187,10 @@ impl Actor {
             skipped: inf.reason.map(String::from),
             vision_ms,
         });
+        // Only consecutive unexplained reads count: any other settled read resets the run.
+        let lost_run = self.unexplained.record(inf.reason == Some("unexplained change"));
         if inf.accept {
             let mv = inf.best.expect("accepted inference has a move");
-            self.unexplained = 0;
             self.lost = false;
             self.vision.commit_reference(stats);
             self.settled_at = Some(frame.at);
@@ -202,7 +203,6 @@ impl Actor {
         let squares_clear = inf.margin >= self.vision.min_margin() && inf.residual <= self.vision.max_residual();
         if promo && squares_clear && inf.reason == Some("ambiguous") && self.llm.is_none() {
             let mv = inf.best.expect("checked above");
-            self.unexplained = 0;
             self.vision.commit_reference(stats);
             self.settled_at = Some(frame.at);
             self.bus.emit(EventKind::Info { message: "promotion read as a queen; undo if it was another piece".into() });
@@ -229,12 +229,7 @@ impl Actor {
                 };
                 self.ask_pick(frame, cands);
             }
-            Some("unexplained change") => {
-                self.unexplained += 1;
-                if self.unexplained >= UNEXPLAINED_LIMIT {
-                    self.set_lost("the board doesn't match the game");
-                }
-            }
+            Some("unexplained change") if lost_run => self.set_lost("the board doesn't match the game"),
             _ => {}
         }
     }
@@ -480,7 +475,7 @@ impl Actor {
         let corners = Corners::from_view(px, self.cfg.my_color == Color::White);
         self.vision.set_corners(frame, corners);
         self.lost = false;
-        self.unexplained = 0;
+        self.unexplained.reset();
         self.bus.emit(EventKind::BoardFound { source: source.into() });
         self.dirty = true;
     }
@@ -661,6 +656,23 @@ impl Actor {
     }
 }
 
+/// Run of settled reads in a row that no legal move explains.
+#[derive(Default)]
+struct UnexplainedRun(u32);
+
+impl UnexplainedRun {
+    /// Record one settled read. Returns true once `UNEXPLAINED_LIMIT`
+    /// unexplained reads have come in a row.
+    fn record(&mut self, unexplained: bool) -> bool {
+        self.0 = if unexplained { self.0 + 1 } else { 0 };
+        self.0 >= UNEXPLAINED_LIMIT
+    }
+
+    fn reset(&mut self) {
+        self.0 = 0;
+    }
+}
+
 pub async fn encode_jpeg(frame: &Frame) -> Vec<u8> {
     let frame = frame.clone();
     tokio::task::spawn_blocking(move || {
@@ -682,4 +694,50 @@ fn color_name(c: Color) -> &'static str {
 
 fn ms(d: Duration) -> f32 {
     d.as_secs_f32() * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::Rig;
+    use shakmaty::{Chess, Square};
+
+    /// Reason of the settled read of the start position, with an optional hand on the board.
+    fn read(rig: &mut Rig, hand: Option<(Square, f32)>) -> Option<&'static str> {
+        let pos = Chess::default();
+        match rig.settle(Some(pos.board()), hand, &pos) {
+            Some(Outcome::Read { inference, .. }) => inference.reason,
+            _ => panic!("expected a fresh read"),
+        }
+    }
+
+    #[test]
+    fn unexplained_counts_only_consecutive_reads() {
+        let pos = Chess::default();
+        let mut rig = Rig::new(pos.board());
+        assert!(matches!(rig.settle(Some(pos.board()), None, &pos), Some(Outcome::Baseline)));
+        let mut run = UnexplainedRun::default();
+
+        // Sporadic misreads (a hand resting on the board, then gone): each is
+        // followed by a clean "no change" read, so the run never builds up.
+        for sq in [Square::E5, Square::C5, Square::D5, Square::B5, Square::G5] {
+            let reason = read(&mut rig, Some((sq, 45.0)));
+            assert_eq!(reason, Some("unexplained change"));
+            assert!(!run.record(reason == Some("unexplained change")), "lost on a sporadic misread");
+            let reason = read(&mut rig, None);
+            assert_eq!(reason, Some("no change"));
+            assert!(!run.record(reason == Some("unexplained change")));
+        }
+
+        // Three unexplained reads in a row do declare the board lost.
+        let hits: Vec<bool> = [Square::D5, Square::B5, Square::G5]
+            .into_iter()
+            .map(|sq| {
+                let reason = read(&mut rig, Some((sq, 45.0)));
+                assert_eq!(reason, Some("unexplained change"));
+                run.record(true)
+            })
+            .collect();
+        assert_eq!(hits, [false, false, true]);
+    }
 }

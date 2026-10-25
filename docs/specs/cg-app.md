@@ -30,7 +30,7 @@ Per new frame (watch changed):
    - accept → commit (side = whoever is to move), reference = current stats, then go to "after commit".
    - "no change" → nothing.
    - "ambiguous" with LLM → `pick_move` among the top ranked candidates (SAN). Answer in the list → commit with source "llm".
-   - "unexplained change" persisting across 3 consecutive fresh-stable reads → `LostTrack("board doesn't match")`.
+   - "unexplained change" on 3 consecutive fresh-stable reads → `LostTrack("board doesn't match")`. Any other settled read (accepted, "no change", "ambiguous") ends the run, so sporadic misreads spread over a game never add up.
 7. After commit: game over → announce and stop. If it's now my turn → request a suggestion (the engine handles ponder hits). If it's now the opponent's turn and the last suggestion had a ponder move → `engine.ponder(position + ponder move)`.
 
 Suggestion reply (tagged with a position id; discard if stale): build `Suggestion` (SAN via shakmaty, `spoken_san`, score), `speaker.say(spoken)`, emit `Suggest`, update the latency numbers.

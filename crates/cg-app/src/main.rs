@@ -7,6 +7,8 @@ mod doctor;
 mod game;
 mod orchestrator;
 mod setup;
+#[cfg(test)]
+mod testkit;
 mod vision;
 
 use std::path::PathBuf;
