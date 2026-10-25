@@ -1,0 +1,9 @@
+# Core (kibitz_tools, tests, lab/sweep.py)
+numpy>=2.1
+pillow>=11
+chess>=1.11        # python-chess; the PyPI name "python-chess" is now only a shim for this
+pytest>=8
+
+# Lab notebook
+matplotlib>=3.9
+jupyter

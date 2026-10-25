@@ -1,0 +1,8 @@
+# Piece classifier (classifier/). CPU wheels:
+#   pip install -r requirements-ml.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+# Verified on Python 3.14 / Windows: torch 2.14.1+cpu, onnx 1.23.2, onnxruntime 1.31.0.
+-r requirements.txt
+torch>=2.6
+onnx>=1.17
+onnxscript>=0.2    # needed by torch.onnx.export(dynamo=True)
+onnxruntime>=1.20

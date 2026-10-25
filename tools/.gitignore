@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+# Run dirs, datasets and trained models: local, not versioned.
+data/
+classifier/*.pt
+classifier/*.onnx
